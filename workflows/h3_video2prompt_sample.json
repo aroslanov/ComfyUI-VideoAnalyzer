@@ -49,10 +49,10 @@
         "Node name for S&R": "H3VLMModelLoader"
       },
       "widgets_values": [
-        "http://127.0.0.1:8777/v1",
-        "qwen2.5-vl-7b-instruct",
+        "Qwen 2.5 VL 7B Instruct (legacy workflows)",
         "",
-        0.2
+        "ComfyUI managed (BF16)",
+        "Auto (SDPA)"
       ]
     },
     {
@@ -89,18 +89,17 @@
       "widgets_values": [
         "T2VA",
         0.0,
-        "frames",
-        480,
         0.0,
         false,
         1.0,
-        32,
-        768,
+        24,
+        512,
         true,
         "small",
         true,
         0.05,
-        12
+        12,
+        8192
       ]
     },
     {
@@ -140,7 +139,7 @@
   "groups": [],
   "config": {},
   "extra": {
-    "note": "VLM Model Loader (H3) points at a local llama.cpp server: llama-server -m Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf -ngl 99 -c 32768 --port 8777"
+    "note": "VLM Model Loader (H3) runs the vision model in-process via ComfyUI_VLM_nodes; the model auto-downloads from HuggingFace on first execution. No external services required."
   },
   "version": 0.4
 }

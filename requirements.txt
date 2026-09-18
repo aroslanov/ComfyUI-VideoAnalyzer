@@ -1,3 +1,4 @@
 faster-whisper
 panns-inference
 json-repair
+# plus: ComfyUI_VLM_nodes (sibling custom node pack, see README) with its own requirements.txt

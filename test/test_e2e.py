@@ -1,18 +1,29 @@
 # Direct e2e test of the pipeline used by MiniMaxH3VideoToPrompt.
-# Usage (embedded python):
+# Usage (embedded python, from anywhere):
 #   python_embeded\python.exe test\test_e2e.py [--mode T2VA] [--videos 1,2,3] [--max-seconds 30]
-# Requires llama-server (or any OpenAI-compatible VLM) running; override with --api-base.
+# Loads the VLM in-process via ComfyUI_VLM_nodes (auto-downloads on first run).
 import argparse
 import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+sys.path.insert(0, r"F:\ComfyUI\ComfyUI")  # comfy package
+sys.path.insert(0, r"F:\ComfyUI\ComfyUI\custom_nodes")  # ComfyUI_VLM_nodes
+
 from pipeline import H3PipelineError, video_to_prompt  # noqa: E402
 
 DEFAULT_VIDEOS = Path(r"C:\Users\Public\Documents\Adobe\Premiere Pro\26.0\Sample Media")
-OUT_DIR = Path(__file__).resolve().parents[1] / "out"
+OUT_DIR = ROOT / "out"
 H3_FIELDS = ("integrated_multimodal_description", "overall_soundscape", "non_diegetic_music")
+DEFAULT_MODEL_LABEL = "Qwen 2.5 VL 7B Instruct (legacy workflows)"
+
+
+def build_vlm(label: str) -> dict:
+    from ComfyUI_VLM_nodes.nodes.modern_vlm import ModernVLMPredictor
+    predictor = ModernVLMPredictor(label, "", "ComfyUI managed (BF16)", "Auto (SDPA)")
+    return {"kind": "local", "predictor": predictor}
 
 
 def check_prompt(mode: str, prompt: str) -> list:
@@ -40,11 +51,9 @@ def check_prompt(mode: str, prompt: str) -> list:
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--mode", default="T2VA")
-    ap.add_argument("--api-base", default="http://127.0.0.1:8777/v1")
-    ap.add_argument("--model", default="qwen2.5-vl-3b-instruct")
+    ap.add_argument("--model", default=DEFAULT_MODEL_LABEL, help="Modern VLM catalog label")
     ap.add_argument("--videos", default="", help="comma separated clip numbers, e.g. 1,16")
     ap.add_argument("--max-seconds", type=float, default=None)
-    ap.add_argument("--analysis-input", default="frames", choices=["frames", "video"])
     ap.add_argument("--no-asr", action="store_true")
     ap.add_argument("--no-tags", action="store_true")
     args = ap.parse_args()
@@ -56,16 +65,15 @@ def main() -> None:
     clips = [c for c in clips if c.is_file()]
     assert clips, "no test videos found"
 
+    vlm = build_vlm(args.model)
     failures = 0
     for clip in clips:
         name = clip.stem
         t0 = time.time()
         try:
             prompt = video_to_prompt(
-                str(clip), OUT_DIR / name,
-                api_base=args.api_base, model=args.model,
+                str(clip), OUT_DIR / name, vlm=vlm,
                 mode=args.mode, max_seconds=args.max_seconds,
-                analysis_input=args.analysis_input,
                 use_asr=not args.no_asr, use_audio_tags=not args.no_tags,
             )
         except H3PipelineError as e:

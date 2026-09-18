@@ -4,9 +4,10 @@
 #   - die() -> H3PipelineError (ComfyUI shows it on the node)
 #   - ASR: mlx-whisper (Apple Silicon only) -> faster-whisper (CPU int8)
 #   - PANNs audio tagging: subprocess isolation (for mlx/numba clashes) -> in-process
-#   - CLI main() -> video_to_prompt() function driven by node inputs
+#   - CLI main() -> video_to_prompt() driven by node inputs
+#   - LLM: OpenAI-compatible HTTP endpoint -> in-process VLM from ComfyUI_VLM_nodes
+#     (frames go through the model's native video pathway, one call per pass)
 
-import base64
 import json
 import os
 import re
@@ -16,8 +17,6 @@ import subprocess
 import tempfile
 import time
 from pathlib import Path
-
-import requests
 
 KEYFRAME_MODES = ("I2VA", "FL2VA", "L2VA")
 H3_MIN_DURATION, H3_MAX_DURATION = 4, 15
@@ -29,6 +28,8 @@ DEFAULT_TAG_MAX = 12
 PANNS_WEIGHTS = Path(__file__).resolve().parent / ".panns" / "Cnn14_mAP=0.431.pth"
 PANNS_WEIGHTS_URL = ("https://huggingface.co/thelou1s/panns-inference/"
                      "resolve/main/Cnn14_mAP%3D0.431.pth")
+TEMPERATURE = 0.2
+TOP_P = 0.9
 
 
 class H3PipelineError(RuntimeError):
@@ -154,33 +155,6 @@ def detect_content_range(video: Path, duration: float, fps: float) -> tuple:
     return (start, end, "; ".join(notes))
 
 
-def make_analysis_video(src: Path, dst: Path, max_side: int,
-                        start: float = 0.0, length: float | None = None,
-                        info: dict | None = None) -> None:
-    """[start, start+length] trimmed to max_side, silent h264 mp4 for LLM video_url mode."""
-    info = info or probe_video(src)
-    w, h = info["width"], info["height"]
-    cmd = ["ffmpeg", "-y", "-v", "error"]
-    if start > 0:
-        cmd += ["-ss", f"{start:.3f}"]
-    cmd += ["-i", str(src)]
-    if length:
-        cmd += ["-t", f"{float(length):.3f}"]
-    cmd += ["-an"]
-
-    if max(w, h) > max_side:
-        if w >= h:
-            scale = f"scale={max_side}:-2"
-        else:
-            scale = f"scale=-2:{max_side}"
-        cmd += ["-vf", scale]
-        log(f"downscale: {w}x{h} -> max side {max_side}")
-
-    cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-pix_fmt", "yuv420p", str(dst)]
-    run_cmd(cmd, "analysis video creation")
-
-
 def extract_keyframes(src: Path, out_dir: Path, fps: float,
                       first_at: float = 0.0, last_at: float | None = None) -> dict:
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -200,57 +174,42 @@ def extract_keyframes(src: Path, out_dir: Path, fps: float,
 
 
 # ---------------------------------------------------------------------------
-# LLM
+# VLM (in-process, via ComfyUI_VLM_nodes ModernVLMPredictor)
 # ---------------------------------------------------------------------------
 
-class LLMClient:
-    def __init__(self, api_base: str, model: str, temperature: float = 0.2, api_key: str = ""):
-        self.url = api_base.rstrip("/") + "/chat/completions"
-        self.model = model
-        self.temperature = temperature
-        self.api_key = api_key
+def frames_to_tensor(frames: list):
+    """[(jpg_path, abs_seconds), ...] -> torch batch [N,H,W,3] float 0-1 (ComfyUI IMAGE layout)."""
+    import numpy as np
+    import torch
+    from PIL import Image
+    arrays = [np.asarray(Image.open(p).convert("RGB"), dtype=np.float32) / 255.0
+              for p, _ in frames]
+    return torch.from_numpy(np.stack(arrays))
 
-    def _headers(self) -> dict:
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
 
-    def chat(self, messages: list, max_tokens: int, retries: int = 3,
-             timeout: tuple = (15, 900), temperature: float | None = None) -> str:
-        payload = {
-            "model": self.model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
-        last_err = None
-        for attempt in range(1, retries + 1):
-            # small models occasionally collapse into single-char token spam;
-            # retry hotter instead of failing the whole node run
-            payload["temperature"] = (self.temperature if temperature is None else temperature) + 0.4 * (attempt - 1)
-            try:
-                log(f"LLM call... (attempt {attempt}/{retries})")
-                t0 = time.time()
-                resp = requests.post(self.url, json=payload, headers=self._headers(), timeout=timeout)
-                if 400 <= resp.status_code < 500 and resp.status_code != 429:
-                    die(f"LLM endpoint returned HTTP {resp.status_code} (no retry):\n{resp.text[:500]}")
-                if 500 <= resp.status_code < 600:
-                    raise requests.HTTPError(f"HTTP {resp.status_code}: {resp.text[:500]}")
-                resp.raise_for_status()
-                data = resp.json()
-                content = data["choices"][0]["message"]["content"]
-                if len(content) > 200 and len(set(content[:400])) <= 3:
-                    raise ValueError(f"degenerate output (single repeated char, "
-                                     f"uniq={len(set(content[:400]))})")
-                log(f"LLM response: {time.time() - t0:.1f} s, {len(content)} chars")
-                return content
-            except (requests.RequestException, KeyError, json.JSONDecodeError, ValueError) as e:
-                last_err = e
-                log(f"response error: {e}")
-                if attempt < retries:
-                    time.sleep(3)
-        die(f"LLM call failed {retries} times: {last_err}")
+def text_generate(predictor, prompt: str, max_new_tokens: int,
+                  temperature: float = TEMPERATURE) -> str:
+    """Text-only chat completion on the predictor's loaded model."""
+    import torch
+    from ComfyUI_VLM_nodes.nodes.runtime import (inference_context, model_device,
+                                                 move_inputs)
+    model = predictor.handle.ensure_loaded()
+    device = model_device(model)
+    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+    inputs = predictor.processor.apply_chat_template(
+        messages, add_generation_prompt=True, tokenize=True,
+        return_dict=True, return_tensors="pt",
+    )
+    inputs = move_inputs(inputs, device)
+    generation = {"max_new_tokens": int(max_new_tokens), "do_sample": temperature > 0}
+    if temperature > 0:
+        generation.update(temperature=temperature, top_p=TOP_P)
+    with torch.inference_mode(), inference_context(device, predictor.dtype):
+        output = model.generate(**inputs, **generation)
+    n = inputs["input_ids"].shape[-1]
+    return predictor.processor.batch_decode(
+        output[:, n:], skip_special_tokens=True, clean_up_tokenization_spaces=False,
+    )[0].strip()
 
 
 def extract_json(text: str) -> dict:
@@ -347,7 +306,7 @@ def transcribe(wav: Path, model: str, language: str | None) -> dict:
     segments, info = m.transcribe(str(wav), language=language)
     segments = list(segments)
     # whisper sometimes decodes non-Latin speech as pure '?' runs; that junk
-    # also derails the vision LLM, so drop such segments
+    # also derails the VLM, so drop such segments
     clean = []
     for s in segments:
         alnum = sum(c.isalnum() for c in s.text)
@@ -430,7 +389,7 @@ def audio_tags(wav_32k: Path, threshold: float = DEFAULT_TAG_THRESHOLD,
 
 
 # ---------------------------------------------------------------------------
-# Pass 1 input builders (video_url mode / frames mode)
+# Pass 1: frame sampling + single-call analysis over the model's video pathway
 # ---------------------------------------------------------------------------
 
 def extract_frames(video: Path, out_dir: Path, start: float, length: float,
@@ -449,13 +408,13 @@ def extract_frames(video: Path, out_dir: Path, start: float, length: float,
     run_cmd(cmd, "frame extraction")
     paths = sorted(out_dir.glob("frame_*.jpg"))
     if not paths:
-        die("frame extraction produced 0 frames. Check --frame-fps / --max-frames")
+        die("frame extraction produced 0 frames. Check frame_fps / max_frames")
     return [(p, start + i / fps) for i, p in enumerate(paths)]
 
 
-def run_analysis(client: LLMClient, video_b64: str, transcript: str | None,
-                 tags: list | None = None) -> dict:
-    """Pass 1 with the downscaled mp4 as video_url (needs a video-vision endpoint, e.g. vLLM)."""
+def run_analysis(predictor, frames: list, transcript: str | None,
+                 tags: list | None, frame_fps: float, max_new_tokens: int) -> dict:
+    """Pass 1: all sampled frames in one call through the model's video pathway."""
     text = ANALYSIS_PROMPT
     if transcript:
         text += (
@@ -472,124 +431,39 @@ def run_analysis(client: LLMClient, video_b64: str, transcript: str | None,
             "Keep the sounds field and any music description consistent with these tags.\n"
             + "\n".join(tags)
         )
-    messages = [{
-        "role": "user",
-        "content": [
-            {"type": "text", "text": text},
-            {"type": "video_url",
-             "video_url": {"url": f"data:video/mp4;base64,{video_b64}"}},
-        ],
-    }]
-    raw = client.chat(messages, max_tokens=8192)
+    video_batch = frames_to_tensor(frames)
+    log(f"analyzing {len(frames)} frames (native video input)...")
+    raw = predictor.generate(
+        images=None,
+        prompt=text,
+        system_prompt="",
+        max_new_tokens=max_new_tokens,
+        temperature=TEMPERATURE,
+        top_p=TOP_P,
+        video_frames=video_batch,
+        fps=frame_fps,
+    )
     try:
         return extract_json(raw)
     except (ValueError, json.JSONDecodeError) as e:
-        log(f"JSON parse failed ({e}). Asking the LLM to fix it...")
-        retry_messages = messages + [
-            {"role": "assistant", "content": raw},
-            {"role": "user",
-             "content": "The output above is not valid JSON. Re-output only valid JSON following the schema. No code fences."},
-        ]
-        raw2 = client.chat(retry_messages, max_tokens=8192, temperature=0.6)
-        return extract_json(raw2)
-
-
-def _merge_analyses(parts: list) -> dict:
-    """Merge per-chunk analysis JSONs into one (shots reindexed, lists concatenated)."""
-    merged = {"style": parts[0].get("style", ""), "shots": [], "speakers": [],
-              "dialogue": [], "on_screen_text": [], "sounds": ""}
-    shot_idx = 1
-    seen_speakers, seen_text, seen_sounds = set(), set(), set()
-    for p in parts:
-        for s in p.get("shots", []):
-            s = dict(s)
-            s["index"] = shot_idx
-            shot_idx += 1
-            merged["shots"].append(s)
-        for sp in p.get("speakers", []):
-            if sp.get("id") not in seen_speakers:
-                seen_speakers.add(sp.get("id"))
-                merged["speakers"].append(sp)
-        merged["dialogue"] += p.get("dialogue", [])
-        for t in p.get("on_screen_text", []):
-            if t not in seen_text:
-                seen_text.add(t)
-                merged["on_screen_text"].append(t)
-        sounds = p.get("sounds", "")
-        if isinstance(sounds, list):
-            sounds = "; ".join(str(s) for s in sounds)
-        if sounds and sounds not in seen_sounds:
-            seen_sounds.add(sounds)
-            merged["sounds"] = "; ".join(x for x in (merged["sounds"], sounds) if x)
-    return merged
-
-
-def run_analysis_frames(client: LLMClient, frames: list, transcript: str | None,
-                        tags: list | None = None, chunk_size: int = 8) -> dict:
-    """Pass 1 with timestamped jpg frames as image_url array (works with llama.cpp/LM Studio).
-
-    Frames are analyzed in chunks of chunk_size images per request: small local VLMs
-    degrade or degenerate on large multi-image prompts, and small requests also
-    describe each frame more accurately."""
-    def one_chunk(chunk: list, part: int, total: int) -> dict:
-        text = ANALYSIS_PROMPT
-        text += (
-            "\n\n[Note on input format]\n"
-            f"Instead of the video itself, {len(chunk)} frame images sampled chronologically are attached. "
-            "Each image is preceded by a \"Frame at T.Ts\" heading giving its absolute seconds in the video. "
-            "Use these timestamps as the clue for shot boundaries and time_range (do not interpolate content "
-            "between frames; base your analysis only on what is visible in the frames)."
+        fail_path = frames[0][0].parent / "analysis_failed_1.txt"
+        fail_path.write_text(raw + "\n", encoding="utf-8")
+        log(f"JSON parse failed ({e}); raw saved to {fail_path.name}. Retrying...")
+        raw2 = predictor.generate(
+            images=None,
+            prompt=text + "\n\nIMPORTANT: Output only valid JSON following the schema, no code fences.",
+            system_prompt="",
+            max_new_tokens=max_new_tokens,
+            temperature=0.6,
+            top_p=TOP_P,
+            video_frames=video_batch,
+            fps=frame_fps,
         )
-        if total > 1:
-            text += (
-                f"\n\nThis is part {part} of {total} of the frame set. Analyze ONLY these frames; "
-                "other parts cover the rest of the timeline. time_range must stay in absolute "
-                "seconds of the whole video, based on the Frame headings."
-            )
-        if transcript:
-            text += (
-                "\n\n[Transcript (ground truth for dialogue/lyrics)]\n"
-                "A timestamped transcript is provided (speech or sung lyrics).\n"
-                "Match dialogue text/language/time to this transcript and set confidence to \"high\".\n"
-                "Treat sung lyrics as dialogue too.\n"
-                + transcript
-            )
-        if tags:
-            text += (
-                "\n\n[Audio tags (computed from the real audio: PANNs/AudioSet, with confidence)]\n"
-                "The following music/instrument/voice/ambience labels were detected in the real audio.\n"
-                "Keep the sounds field and any music description consistent with these tags.\n"
-                + "\n".join(tags)
-            )
-
-        content: list = [{"type": "text", "text": text}]
-        for path, t in chunk:
-            b64 = base64.b64encode(path.read_bytes()).decode()
-            content.append({"type": "text", "text": f"Frame at {t:.2f}s"})
-            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
-
-        messages = [{"role": "user", "content": content}]
-        raw = client.chat(messages, max_tokens=8192)
         try:
-            return extract_json(raw)
-        except (ValueError, json.JSONDecodeError) as e:
-            log(f"JSON parse failed ({e}). Asking the LLM to fix it...")
-            retry_messages = messages + [
-                {"role": "assistant", "content": raw},
-                {"role": "user",
-                 "content": "The output above is not valid JSON. Re-output only valid JSON following the schema. No code fences."},
-            ]
-            raw2 = client.chat(retry_messages, max_tokens=8192)
             return extract_json(raw2)
-
-    if len(frames) <= chunk_size:
-        return one_chunk(frames, 1, 1)
-    chunks = [frames[i:i + chunk_size] for i in range(0, len(frames), chunk_size)]
-    parts = []
-    for n, chunk in enumerate(chunks, 1):
-        log(f"analyzing frames {n * chunk_size - len(chunk) + 1}-{n * chunk_size} / {len(frames)}")
-        parts.append(one_chunk(chunk, n, len(chunks)))
-    return _merge_analyses(parts)
+        except (ValueError, json.JSONDecodeError):
+            (frames[0][0].parent / "analysis_failed_2.txt").write_text(raw2 + "\n", encoding="utf-8")
+            raise
 
 
 # ---------------------------------------------------------------------------
@@ -798,6 +672,43 @@ def strip_stray_tags(text: str) -> str:
     return re.sub(r"</?[a-zA-Z][a-zA-Z0-9 _-]*>", _keep, text)
 
 
+def _fix_field_labels(text: str) -> str:
+    """Repair near-miss field labels (e.g. 'overall_soundsscape', 'Non-Diegetic-Music')
+    before validation."""
+    import difflib
+    fields = ("integrated_multimodal_description", "overall_soundscape",
+              "non_diegetic_music")
+    # pass 1: separator/case variants ("non-diegetic music", "non non diegetic music")
+    for expected in fields:
+        first, rest = expected.split("_", 1)
+        flex = r"[\s_-]*".join(map(re.escape, rest.split("_")))
+        pattern = re.compile(
+            r"(?<![A-Za-z_])" + re.escape(first) + r"[\s_-]*"
+            + rf"(?:{re.escape(first)}[\s_-]*)?" + flex + r"\b",
+            re.IGNORECASE,
+        )
+        text = pattern.sub(expected, text)
+    # pass 2: letter-level typos ("overall_soundsscape")
+    tokens = set(re.findall(r"[a-zA-Z_]{8,}", text))
+    for expected in fields:
+        if expected + ":" in text:
+            continue
+        close = difflib.get_close_matches(expected, tokens, n=1, cutoff=0.85)
+        if close and close[0] != expected:
+            log(f"fixed field label typo: {close[0]!r} -> {expected!r}")
+            text = text.replace(close[0], expected)
+    # pass 3: label reduced to its last word at line start ("Soundscape: ...")
+    for expected in fields:
+        if expected + ":" in text:
+            continue
+        last = expected.rsplit("_", 1)[-1]
+        text, n = re.subn(rf"(?m)^(\s*){last}\s*:", rf"\1{expected}:", text,
+                          count=1, flags=re.IGNORECASE)
+        if n:
+            log(f"restored shortened field label: {last!r} -> {expected!r}")
+    return text
+
+
 def _validate_rewrite(raw: str, mode: str) -> str:
     m = re.search(r"```(?:text|prompt)?\s*(.*?)\s*```", raw, re.DOTALL)
     if m:
@@ -815,6 +726,7 @@ def _validate_rewrite(raw: str, mode: str) -> str:
         return raw
     raw = strip_alignment_line(raw)
     raw = strip_stray_tags(raw)
+    raw = _fix_field_labels(raw)
     fields = ("integrated_multimodal_description", "overall_soundscape",
               "non_diegetic_music")
     positions = []
@@ -828,28 +740,30 @@ def _validate_rewrite(raw: str, mode: str) -> str:
     return format_shot_breaks(raw)
 
 
-def run_rewrite(client: LLMClient, mode: str, duration: float, analysis: dict,
+def run_rewrite(predictor, mode: str, duration: float, analysis: dict,
                 guide_text: str, transcript: str | None,
-                tags: list | None = None) -> str:
+                tags: list | None = None, max_new_tokens: int = 8192,
+                out_dir: Path | None = None) -> str:
     prompt = build_rewrite_prompt(mode, duration, analysis, guide_text, transcript,
                                   tags=tags)
-    messages = [{"role": "user", "content": prompt}]
     last_err = None
-    # small local models sometimes ramble or drop a field; one corrective retry
+    # small models sometimes ramble or drop a field; one corrective retry
     for attempt in range(2):
-        raw = client.chat(messages, max_tokens=8192)
+        raw = text_generate(predictor, prompt, max_new_tokens,
+                            temperature=TEMPERATURE if attempt == 0 else 0.6)
         try:
             return _validate_rewrite(raw, mode)
         except H3PipelineError as e:
             last_err = e
+            if out_dir is not None:
+                (out_dir / f"rewrite_failed_{attempt + 1}.txt").write_text(
+                    raw + "\n", encoding="utf-8")
             log(f"rewrite validation failed ({e}); retrying with correction")
-            messages = messages + [
-                {"role": "assistant", "content": raw},
-                {"role": "user",
-                 "content": f"Your output was invalid: {e}\n"
-                            "Re-output ONLY the required fields with no commentary, no code fences, "
-                            "keeping every required field name exactly."},
-            ]
+            prompt = (
+                f"Your previous output was invalid: {e}\n"
+                "Redo the task below and re-output ONLY the required fields with no commentary, "
+                "no code fences, keeping every required field name exactly.\n\n" + prompt
+            )
     die(f"LLM rewrite failed validation twice: {last_err}")
 
 
@@ -857,7 +771,7 @@ def resolve_duration(mode: str, requested: float | None, effective_len: float) -
     if mode == "LTX":
         raw = round(effective_len) if requested is None else requested
         if not (LTX_MIN_DURATION <= raw <= LTX_MAX_DURATION):
-            die(f"LTX mode --duration must be 6-20 s (got: {requested})")
+            die(f"LTX mode duration must be 6-20 s (got: {requested})")
         return float(min(LTX_VALID_DURATIONS, key=lambda v: abs(v - raw)))
     dur = min(H3_MAX_DURATION, max(H3_MIN_DURATION, round(effective_len))) if requested is None else requested
     if not (H3_MIN_DURATION <= dur <= H3_MAX_DURATION):
@@ -869,25 +783,23 @@ def resolve_duration(mode: str, requested: float | None, effective_len: float) -
 # main entry used by the ComfyUI node
 # ---------------------------------------------------------------------------
 
-def video_to_prompt(video_path: str, out_dir: Path,
-                    api_base: str, model: str, api_key: str = "",
+def video_to_prompt(video_path: str, out_dir: Path, vlm: dict,
                     mode: str = "T2VA", duration: float | None = None,
-                    analysis_input: str = "frames",
-                    max_side: int = 480, max_seconds: float | None = None,
+                    max_seconds: float | None = None,
                     keep_fade: bool = False,
-                    frame_fps: float = 1.0, max_frames: int = 32,
-                    frame_max_side: int = 768,
+                    frame_fps: float = 1.0, max_frames: int = 24,
+                    frame_max_side: int = 512,
                     use_asr: bool = True, asr_model: str = DEFAULT_ASR_MODEL,
-                    asr_language: str | None = None,
                     use_audio_tags: bool = True,
                     tags_threshold: float = DEFAULT_TAG_THRESHOLD,
                     tags_max: int = DEFAULT_TAG_MAX,
-                    temperature: float = 0.2) -> str:
+                    max_new_tokens: int = 8192) -> str:
     """Analyze a video file and return the final H3/LTX prompt. Writes
     analysis.json / prompt.txt (+ frames/, keyframes/, transcript.txt, audio_tags.txt)
     under out_dir for debugging."""
     require_tool("ffmpeg")
     require_tool("ffprobe")
+    predictor = vlm["predictor"]
     video = Path(video_path)
     if not video.is_file():
         die(f"video not found: {video}")
@@ -934,7 +846,7 @@ def video_to_prompt(video_path: str, out_dir: Path,
         wav = out_dir / "audio_16k.wav"
         extract_audio(video, wav, analysis_start, analysis_len)
         try:
-            result = transcribe(wav, asr_model, asr_language)
+            result = transcribe(wav, asr_model, None)
         except ImportError:
             log("warning: faster_whisper not installed, skipping ASR (pip install faster-whisper)")
         except Exception as e:
@@ -965,26 +877,19 @@ def video_to_prompt(video_path: str, out_dir: Path,
             else:
                 log("audio tags: none above threshold")
 
-    client = LLMClient(api_base, model, temperature, api_key=api_key)
-    if analysis_input == "video":
-        analysis_video = out_dir / "analysis_downscaled.mp4"
-        make_analysis_video(video, analysis_video, max_side,
-                            start=analysis_start, length=analysis_len, info=info)
-        video_b64 = base64.b64encode(analysis_video.read_bytes()).decode()
-        log(f"analysis video: {analysis_video.stat().st_size / 1e6:.2f} MB (base64 video_url)")
-        analysis = run_analysis(client, video_b64, transcript, tags=tag_lines)
-    else:
-        frames = extract_frames(video, frames_dir, analysis_start, analysis_len,
-                                fps=frame_fps, max_side=frame_max_side,
-                                max_frames=max_frames)
-        log(f"frames extracted: {len(frames)} ({frames_dir})")
-        analysis = run_analysis_frames(client, frames, transcript, tags=tag_lines)
+    frames = extract_frames(video, frames_dir, analysis_start, analysis_len,
+                            fps=frame_fps, max_side=frame_max_side,
+                            max_frames=max_frames)
+    log(f"frames extracted: {len(frames)} ({frames_dir})")
+    analysis = run_analysis(predictor, frames, transcript, tag_lines,
+                            frame_fps, max_new_tokens)
 
     (out_dir / "analysis.json").write_text(
         json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    prompt_text = run_rewrite(client, mode, duration, analysis, guide_text,
-                              transcript, tags=tag_lines)
+    prompt_text = run_rewrite(predictor, mode, duration, analysis, guide_text,
+                              transcript, tags=tag_lines, max_new_tokens=max_new_tokens,
+                              out_dir=out_dir)
     alignment = build_alignment_line(mode, duration)
     if alignment:
         prompt_text = alignment + "\n\n" + prompt_text

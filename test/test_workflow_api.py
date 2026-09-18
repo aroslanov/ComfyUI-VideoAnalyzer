@@ -9,14 +9,16 @@ import urllib.request
 API_FORMAT = {
     "1": {"class_type": "LoadVideo", "inputs": {"file": ""}},
     "2": {"class_type": "H3VLMModelLoader", "inputs": {
-        "api_base": "http://127.0.0.1:8777/v1",
-        "model": "qwen2.5-vl-7b-instruct", "api_key": "", "temperature": 0.2}},
+        "model": "Qwen 2.5 VL 7B Instruct (legacy workflows)",
+        "custom_model_id": "",
+        "memory_mode": "ComfyUI managed (BF16)",
+        "attention_mode": "Auto (SDPA)"}},
     "3": {"class_type": "MiniMaxH3VideoToPrompt", "inputs": {
         "video": ["1", 0], "vlm": ["2", 0], "mode": "T2VA", "duration": 0.0,
-        "analysis_input": "frames", "max_side": 480, "max_seconds": 0.0,
-        "keep_fade": False, "frame_fps": 1.0, "max_frames": 32, "frame_max_side": 768,
+        "max_seconds": 0.0,
+        "keep_fade": False, "frame_fps": 1.0, "max_frames": 24, "frame_max_side": 512,
         "use_asr": True, "asr_model": "small", "use_audio_tags": True,
-        "tags_threshold": 0.05, "tags_max": 12}},
+        "tags_threshold": 0.05, "tags_max": 12, "max_new_tokens": 8192}},
     "4": {"class_type": "ShowH3Prompt", "inputs": {"prompt": ["3", 0]}},
 }
 
