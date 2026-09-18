@@ -50,7 +50,7 @@
       },
       "widgets_values": [
         "http://127.0.0.1:8777/v1",
-        "qwen2.5-vl-3b-instruct",
+        "qwen2.5-vl-7b-instruct",
         "",
         0.2
       ]

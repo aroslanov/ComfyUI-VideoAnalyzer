@@ -72,6 +72,10 @@ def main() -> None:
             print(f"FAIL {name}: {e}", flush=True)
             failures += 1
             continue
+        except Exception as e:
+            print(f"FAIL {name}: unexpected {type(e).__name__}: {e}", flush=True)
+            failures += 1
+            continue
         errs = check_prompt(args.mode, prompt)
         status = "PASS" if not errs else "FAIL"
         if errs:

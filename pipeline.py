@@ -216,16 +216,19 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
 
-    def chat(self, messages: list, max_tokens: int, retries: int = 2,
+    def chat(self, messages: list, max_tokens: int, retries: int = 3,
              timeout: tuple = (15, 900), temperature: float | None = None) -> str:
         payload = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.temperature if temperature is None else temperature,
+            "temperature": temperature,
             "max_tokens": max_tokens,
         }
         last_err = None
         for attempt in range(1, retries + 1):
+            # small models occasionally collapse into single-char token spam;
+            # retry hotter instead of failing the whole node run
+            payload["temperature"] = (self.temperature if temperature is None else temperature) + 0.4 * (attempt - 1)
             try:
                 log(f"LLM call... (attempt {attempt}/{retries})")
                 t0 = time.time()
@@ -237,9 +240,12 @@ class LLMClient:
                 resp.raise_for_status()
                 data = resp.json()
                 content = data["choices"][0]["message"]["content"]
+                if len(content) > 200 and len(set(content[:400])) <= 3:
+                    raise ValueError(f"degenerate output (single repeated char, "
+                                     f"uniq={len(set(content[:400]))})")
                 log(f"LLM response: {time.time() - t0:.1f} s, {len(content)} chars")
                 return content
-            except (requests.RequestException, KeyError, json.JSONDecodeError) as e:
+            except (requests.RequestException, KeyError, json.JSONDecodeError, ValueError) as e:
                 last_err = e
                 log(f"response error: {e}")
                 if attempt < retries:
@@ -340,10 +346,19 @@ def transcribe(wav: Path, model: str, language: str | None) -> dict:
     m = WhisperModel(model, device="cpu", compute_type="int8")
     segments, info = m.transcribe(str(wav), language=language)
     segments = list(segments)
-    log(f"ASR done: {time.time() - t0:.1f} s (language={info.language})")
+    # whisper sometimes decodes non-Latin speech as pure '?' runs; that junk
+    # also derails the vision LLM, so drop such segments
+    clean = []
+    for s in segments:
+        alnum = sum(c.isalnum() for c in s.text)
+        if alnum == 0 or s.text.count("?") > alnum / 2:
+            continue
+        clean.append(s)
+    log(f"ASR done: {time.time() - t0:.1f} s (language={info.language}, "
+        f"{len(clean)}/{len(segments)} segments kept)")
     return {
-        "segments": [{"start": s.start, "end": s.end, "text": s.text} for s in segments],
-        "text": "".join(s.text for s in segments),
+        "segments": [{"start": s.start, "end": s.end, "text": s.text} for s in clean],
+        "text": "".join(s.text for s in clean),
         "language": info.language,
     }
 
@@ -479,52 +494,102 @@ def run_analysis(client: LLMClient, video_b64: str, transcript: str | None,
         return extract_json(raw2)
 
 
+def _merge_analyses(parts: list) -> dict:
+    """Merge per-chunk analysis JSONs into one (shots reindexed, lists concatenated)."""
+    merged = {"style": parts[0].get("style", ""), "shots": [], "speakers": [],
+              "dialogue": [], "on_screen_text": [], "sounds": ""}
+    shot_idx = 1
+    seen_speakers, seen_text, seen_sounds = set(), set(), set()
+    for p in parts:
+        for s in p.get("shots", []):
+            s = dict(s)
+            s["index"] = shot_idx
+            shot_idx += 1
+            merged["shots"].append(s)
+        for sp in p.get("speakers", []):
+            if sp.get("id") not in seen_speakers:
+                seen_speakers.add(sp.get("id"))
+                merged["speakers"].append(sp)
+        merged["dialogue"] += p.get("dialogue", [])
+        for t in p.get("on_screen_text", []):
+            if t not in seen_text:
+                seen_text.add(t)
+                merged["on_screen_text"].append(t)
+        sounds = p.get("sounds", "")
+        if isinstance(sounds, list):
+            sounds = "; ".join(str(s) for s in sounds)
+        if sounds and sounds not in seen_sounds:
+            seen_sounds.add(sounds)
+            merged["sounds"] = "; ".join(x for x in (merged["sounds"], sounds) if x)
+    return merged
+
+
 def run_analysis_frames(client: LLMClient, frames: list, transcript: str | None,
-                        tags: list | None = None) -> dict:
-    """Pass 1 with timestamped jpg frames as image_url array (works with llama.cpp/LM Studio)."""
-    text = ANALYSIS_PROMPT
-    text += (
-        "\n\n[Note on input format]\n"
-        f"Instead of the video itself, {len(frames)} frame images sampled chronologically are attached. "
-        "Each image is preceded by a \"Frame at T.Ts\" heading giving its absolute seconds in the video. "
-        "Use these timestamps as the clue for shot boundaries and time_range (do not interpolate content "
-        "between frames; base your analysis only on what is visible in the frames)."
-    )
-    if transcript:
-        text += (
-            "\n\n[Transcript (ground truth for dialogue/lyrics)]\n"
-            "A timestamped transcript is provided (speech or sung lyrics).\n"
-            "Match dialogue text/language/time to this transcript and set confidence to \"high\".\n"
-            "Treat sung lyrics as dialogue too.\n"
-            + transcript
-        )
-    if tags:
-        text += (
-            "\n\n[Audio tags (computed from the real audio: PANNs/AudioSet, with confidence)]\n"
-            "The following music/instrument/voice/ambience labels were detected in the real audio.\n"
-            "Keep the sounds field and any music description consistent with these tags.\n"
-            + "\n".join(tags)
-        )
+                        tags: list | None = None, chunk_size: int = 8) -> dict:
+    """Pass 1 with timestamped jpg frames as image_url array (works with llama.cpp/LM Studio).
 
-    content: list = [{"type": "text", "text": text}]
-    for path, t in frames:
-        b64 = base64.b64encode(path.read_bytes()).decode()
-        content.append({"type": "text", "text": f"Frame at {t:.2f}s"})
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+    Frames are analyzed in chunks of chunk_size images per request: small local VLMs
+    degrade or degenerate on large multi-image prompts, and small requests also
+    describe each frame more accurately."""
+    def one_chunk(chunk: list, part: int, total: int) -> dict:
+        text = ANALYSIS_PROMPT
+        text += (
+            "\n\n[Note on input format]\n"
+            f"Instead of the video itself, {len(chunk)} frame images sampled chronologically are attached. "
+            "Each image is preceded by a \"Frame at T.Ts\" heading giving its absolute seconds in the video. "
+            "Use these timestamps as the clue for shot boundaries and time_range (do not interpolate content "
+            "between frames; base your analysis only on what is visible in the frames)."
+        )
+        if total > 1:
+            text += (
+                f"\n\nThis is part {part} of {total} of the frame set. Analyze ONLY these frames; "
+                "other parts cover the rest of the timeline. time_range must stay in absolute "
+                "seconds of the whole video, based on the Frame headings."
+            )
+        if transcript:
+            text += (
+                "\n\n[Transcript (ground truth for dialogue/lyrics)]\n"
+                "A timestamped transcript is provided (speech or sung lyrics).\n"
+                "Match dialogue text/language/time to this transcript and set confidence to \"high\".\n"
+                "Treat sung lyrics as dialogue too.\n"
+                + transcript
+            )
+        if tags:
+            text += (
+                "\n\n[Audio tags (computed from the real audio: PANNs/AudioSet, with confidence)]\n"
+                "The following music/instrument/voice/ambience labels were detected in the real audio.\n"
+                "Keep the sounds field and any music description consistent with these tags.\n"
+                + "\n".join(tags)
+            )
 
-    messages = [{"role": "user", "content": content}]
-    raw = client.chat(messages, max_tokens=8192)
-    try:
-        return extract_json(raw)
-    except (ValueError, json.JSONDecodeError) as e:
-        log(f"JSON parse failed ({e}). Asking the LLM to fix it...")
-        retry_messages = messages + [
-            {"role": "assistant", "content": raw},
-            {"role": "user",
-             "content": "The output above is not valid JSON. Re-output only valid JSON following the schema. No code fences."},
-        ]
-        raw2 = client.chat(retry_messages, max_tokens=8192, temperature=0.6)
-        return extract_json(raw2)
+        content: list = [{"type": "text", "text": text}]
+        for path, t in chunk:
+            b64 = base64.b64encode(path.read_bytes()).decode()
+            content.append({"type": "text", "text": f"Frame at {t:.2f}s"})
+            content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}})
+
+        messages = [{"role": "user", "content": content}]
+        raw = client.chat(messages, max_tokens=8192)
+        try:
+            return extract_json(raw)
+        except (ValueError, json.JSONDecodeError) as e:
+            log(f"JSON parse failed ({e}). Asking the LLM to fix it...")
+            retry_messages = messages + [
+                {"role": "assistant", "content": raw},
+                {"role": "user",
+                 "content": "The output above is not valid JSON. Re-output only valid JSON following the schema. No code fences."},
+            ]
+            raw2 = client.chat(retry_messages, max_tokens=8192)
+            return extract_json(raw2)
+
+    if len(frames) <= chunk_size:
+        return one_chunk(frames, 1, 1)
+    chunks = [frames[i:i + chunk_size] for i in range(0, len(frames), chunk_size)]
+    parts = []
+    for n, chunk in enumerate(chunks, 1):
+        log(f"analyzing frames {n * chunk_size - len(chunk) + 1}-{n * chunk_size} / {len(frames)}")
+        parts.append(one_chunk(chunk, n, len(chunks)))
+    return _merge_analyses(parts)
 
 
 # ---------------------------------------------------------------------------
