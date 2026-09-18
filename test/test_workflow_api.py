@@ -19,7 +19,7 @@ API_FORMAT = {
         "keep_fade": False, "frame_fps": 1.0, "max_frames": 24, "frame_max_side": 512,
         "use_asr": True, "asr_model": "small", "use_audio_tags": True,
         "tags_threshold": 0.05, "tags_max": 12, "max_new_tokens": 8192}},
-    "4": {"class_type": "ShowH3Prompt", "inputs": {"prompt": ["3", 0]}},
+    "4": {"class_type": "ViewText", "inputs": {"text": ["3", 0]}},
 }
 
 

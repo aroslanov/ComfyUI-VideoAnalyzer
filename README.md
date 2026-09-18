@@ -18,7 +18,9 @@ residency is managed by ComfyUI's model manager (smart loading/offloading).
 |------|--------|---------|
 | **VLM Model Loader (H3)** | model picker, custom_model_id, memory_mode, attention_mode | `VLM_MODEL` |
 | **MiniMax H3 Video to Prompt** | `video` (VIDEO), `vlm` (VLM_MODEL), `mode`, `duration`, + advanced options | `STRING` ("Minimax H3 Prompt") |
-| **Show H3 Prompt** | `prompt` (STRING) | displays the text |
+
+Display the result with the **View Text (Streaming)** node from ComfyUI_VLM_nodes
+(`View Nodes/Text` category) — it also shows tokens live while they generate.
 
 Standard nodes are reused wherever possible: video input comes from the core
 **Load Video** node (or any `VIDEO` source, e.g. Wan output), the VLM loader is
@@ -74,7 +76,7 @@ downloads the selected model (Qwen2.5-VL-7B ≈ 16 GB) — watch the console.
 ## Workflow
 
 Load `workflows/h3_video2prompt_sample.json` in ComfyUI:
-`Load Video -> MiniMax H3 Video to Prompt -> Show H3 Prompt`, with the
+`Load Video -> MiniMax H3 Video to Prompt -> View Text (Streaming)`, with the
 VLM Model Loader feeding the analyzer node.
 
 ## Tests

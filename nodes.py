@@ -181,21 +181,3 @@ class MiniMaxH3VideoToPrompt(io.ComfyNode):
             max_new_tokens=max_new_tokens,
         )
         return io.NodeOutput(prompt, ui=ui.PreviewText(prompt))
-
-
-class ShowH3Prompt(io.ComfyNode):
-    @classmethod
-    def define_schema(cls):
-        return io.Schema(
-            node_id="ShowH3Prompt",
-            search_aliases=["show text", "display prompt"],
-            display_name="Show H3 Prompt",
-            category="video_analyzer",
-            is_output_node=True,
-            inputs=[io.String.Input("prompt", force_input=True)],
-            outputs=[io.String.Output()],
-        )
-
-    @classmethod
-    def execute(cls, prompt: str) -> io.NodeOutput:
-        return io.NodeOutput(prompt, ui=ui.PreviewText(prompt))

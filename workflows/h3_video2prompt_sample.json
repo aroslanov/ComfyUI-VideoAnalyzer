@@ -104,7 +104,7 @@
     },
     {
       "id": 4,
-      "type": "ShowH3Prompt",
+      "type": "ViewText",
       "pos": [1000, 240],
       "size": [460, 380],
       "flags": {},
@@ -112,23 +112,46 @@
       "mode": 0,
       "inputs": [
         {
-          "name": "prompt",
+          "name": "text",
           "type": "STRING",
-          "link": 3
+          "link": 3,
+          "widget": {
+            "name": "text"
+          }
         }
       ],
       "outputs": [
         {
-          "name": "STRING",
+          "name": "text",
           "type": "STRING",
           "links": null,
           "slot_index": 0
+        },
+        {
+          "name": "characters",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "words",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "lines",
+          "type": "INT",
+          "links": null
+        },
+        {
+          "name": "stats_json",
+          "type": "STRING",
+          "links": null
         }
       ],
       "properties": {
-        "Node name for S&R": "ShowH3Prompt"
+        "Node name for S&R": "ViewText"
       },
-      "widgets_values": []
+      "widgets_values": [""]
     }
   ],
   "links": [
