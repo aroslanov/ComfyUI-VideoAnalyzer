@@ -50,9 +50,9 @@
       },
       "widgets_values": [
         "Qwen 2.5 VL 7B Instruct (legacy workflows)",
-        "",
         "ComfyUI managed (BF16)",
-        "Auto (SDPA)"
+        "Auto (SDPA)",
+        ""
       ]
     },
     {
@@ -88,8 +88,6 @@
       },
       "widgets_values": [
         "T2VA",
-        0.0,
-        0.0,
         false,
         1.0,
         24,
@@ -99,7 +97,9 @@
         true,
         0.05,
         12,
-        8192
+        8192,
+        0.0,
+        0.0
       ]
     },
     {
