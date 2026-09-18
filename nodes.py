@@ -104,6 +104,12 @@ class H3VLMModelLoader(io.ComfyNode):
         )
         return io.NodeOutput({"kind": "local", "predictor": predictor})
 
+    @classmethod
+    def fingerprint_inputs(cls, model, custom_model_id, memory_mode, attention_mode):
+        # include cache identity so a closed/reset cache forces re-execution
+        return f"{model}|{custom_model_id}|{memory_mode}|{attention_mode}|" \
+               f"{id(_VLM_CACHE['handle'])}"
+
 
 class MiniMaxH3VideoToPrompt(io.ComfyNode):
     @classmethod
@@ -154,6 +160,10 @@ class MiniMaxH3VideoToPrompt(io.ComfyNode):
                 io.Int.Input("tags_max", default=DEFAULT_TAG_MAX, min=1, max=32, advanced=True),
                 io.Int.Input("max_new_tokens", default=8192, min=256, max=16384, step=256, advanced=True,
                              tooltip="Generation budget per LLM pass."),
+                io.Boolean.Input("unload_vlm", default=False, advanced=True,
+                                 tooltip="Release the VLM from memory after this run "
+                                         "(it reloads automatically on the next run). "
+                                         "Useful when diffusion models need the VRAM afterwards."),
             ],
             outputs=[io.String.Output(display_name="Minimax H3 Prompt")],
         )
@@ -162,7 +172,8 @@ class MiniMaxH3VideoToPrompt(io.ComfyNode):
     def execute(cls, video: io.Video.Type, vlm: dict, mode: str, duration: float,
                 max_seconds: float, keep_fade: bool, frame_fps: float, max_frames: int,
                 frame_max_side: int, use_asr: bool, asr_model: str, use_audio_tags: bool,
-                tags_threshold: float, tags_max: int, max_new_tokens: int) -> io.NodeOutput:
+                tags_threshold: float, tags_max: int, max_new_tokens: int,
+                unload_vlm: bool) -> io.NodeOutput:
         if not isinstance(vlm, dict) or vlm.get("kind") != "local":
             raise ValueError("vlm input must come from VLM Model Loader (H3)")
         work_dir = Path(folder_paths.get_temp_directory()) / "h3_video2prompt" / cls.__name__
@@ -171,16 +182,33 @@ class MiniMaxH3VideoToPrompt(io.ComfyNode):
         source = work_dir / "source.mp4"
         # Materialize the VIDEO input (keeps the audio track) for the ffmpeg pipeline
         video.save_to(str(source), format=Types.VideoContainer.MP4, codec=Types.VideoCodec.AUTO)
-        prompt = pipeline.video_to_prompt(
-            str(source), work_dir, vlm=vlm,
-            mode=mode,
-            duration=duration if duration > 0 else None,
-            max_seconds=max_seconds if max_seconds > 0 else None,
-            keep_fade=keep_fade,
-            frame_fps=frame_fps, max_frames=max_frames, frame_max_side=frame_max_side,
-            use_asr=use_asr, asr_model=asr_model,
-            use_audio_tags=use_audio_tags,
-            tags_threshold=tags_threshold, tags_max=tags_max,
-            max_new_tokens=max_new_tokens,
-        )
+        try:
+            prompt = pipeline.video_to_prompt(
+                str(source), work_dir, vlm=vlm,
+                mode=mode,
+                duration=duration if duration > 0 else None,
+                max_seconds=max_seconds if max_seconds > 0 else None,
+                keep_fade=keep_fade,
+                frame_fps=frame_fps, max_frames=max_frames, frame_max_side=frame_max_side,
+                use_asr=use_asr, asr_model=asr_model,
+                use_audio_tags=use_audio_tags,
+                tags_threshold=tags_threshold, tags_max=tags_max,
+                max_new_tokens=max_new_tokens,
+            )
+        finally:
+            if unload_vlm:
+                with _VLM_CACHE["lock"]:
+                    if _VLM_CACHE["handle"] is vlm.get("predictor"):
+                        handle = getattr(_VLM_CACHE["handle"], "handle", None)
+                        if hasattr(handle, "unload"):
+                            # free VRAM but keep the predictor reloadable for the next run
+                            handle.unload()
+                        else:
+                            try:
+                                _VLM_CACHE["handle"].close()
+                            except Exception:
+                                pass
+                            _VLM_CACHE["handle"] = None
+                            _VLM_CACHE["key"] = None
+                pipeline.log("VLM unloaded from memory")
         return io.NodeOutput(prompt, ui=ui.PreviewText(prompt))

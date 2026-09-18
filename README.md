@@ -2,9 +2,15 @@
 
 ComfyUI nodes that turn a video into a **MiniMax H3** video-generation prompt
 (`T2VA` / `I2VA` / `FL2VA` / `L2VA`) or an **LTX-2.5** natural-language prompt,
-by analyzing it with a vision-language model. Based on
-[knishika62/video-analyzer](https://github.com/knishika62/video-analyzer),
-ported to Windows and to ComfyUI's node graph.
+by analyzing it with a vision-language model.
+
+> **Key code source:** this pack is a port of
+> [knishika62/video-analyzer](https://github.com/knishika62/video-analyzer)
+> (`h3_video2prompt.py` + `h3_video2prompt_frames.py`) — the two-pass analysis
+> pipeline, fade detection, keyframe extraction, ASR/audio-tag inputs, the H3/LTX
+> prompt guides (`md/`) and the rewrite validation all originate from that
+> repository. The H3 prompt spec itself comes from
+> [MiniMax-AI/MiniMax-H3](https://github.com/MiniMax-AI/MiniMax-H3).
 
 **Fully self-contained**: the VLM runs inside ComfyUI via
 [ComfyUI_VLM_nodes](https://github.com/gokayfem/ComfyUI_VLM_nodes) — no
@@ -20,7 +26,9 @@ residency is managed by ComfyUI's model manager (smart loading/offloading).
 | **MiniMax H3 Video to Prompt** | `video` (VIDEO), `vlm` (VLM_MODEL), `mode`, `duration`, + advanced options | `STRING` ("Minimax H3 Prompt") |
 
 Display the result with the **View Text (Streaming)** node from ComfyUI_VLM_nodes
-(`View Nodes/Text` category) — it also shows tokens live while they generate.
+(`VLM Nodes/Text` category) — it also shows tokens live while they generate.
+For tight-VRAM workflows the analyzer has an `unload_vlm` option that releases
+the model after each run (it reloads automatically on the next).
 
 Standard nodes are reused wherever possible: video input comes from the core
 **Load Video** node (or any `VIDEO` source, e.g. Wan output), the VLM loader is
@@ -29,12 +37,23 @@ VRAM), and audio/frames are processed with system `ffmpeg`/`ffprobe`.
 
 ## Model
 
-Default: `Qwen 2.5 VL 7B Instruct` (BF16, ~16 GB VRAM). Validated against all
-17 Adobe Premiere sample clips. Smaller/faster picks from the loader's dropdown
-(e.g. `Qwen 3 VL 4B Instruct`, `Qwen 3 VL 2B Instruct`, `SmolVLM2 2.2B Video`)
-auto-download the same way; a `Custom Hugging Face model` field accepts any
-image/video-to-text repo id. For cards under 16 GB VRAM use the 4-bit NF4
-memory mode or a smaller catalog model.
+Default: `Qwen 2.5 VL 7B Instruct` (BF16, ~16 GB VRAM). Smaller/faster picks from
+the loader's dropdown (e.g. `Qwen 3 VL 4B Instruct`, `Qwen 3 VL 2B Instruct`,
+`SmolVLM2 2.2B Video`) auto-download the same way; a `Custom Hugging Face model`
+field accepts any image/video-to-text repo id. For cards under 16 GB VRAM use
+the 4-bit NF4 memory mode or a smaller catalog model.
+
+## Platform support
+
+| Platform | Notes |
+|----------|-------|
+| Windows  | Primary dev/test platform (RTX 5090, CUDA). `ffmpeg` in PATH required. |
+| Linux    | Same code paths (pure `pathlib`, `subprocess ffmpeg`, CPU faster-whisper). CUDA or CPU. |
+| macOS    | Apple Silicon: ComfyUI_VLM_nodes selects Metal; use `ComfyUI managed (BF16)` memory mode and `Auto (SDPA)` attention (the defaults). ASR (faster-whisper) and PANNs run on CPU. |
+
+All models download automatically on first use — no manual model placement:
+the VLM into `ComfyUI/models/LLavacheckpoints/`, faster-whisper and PANNs
+weights into their standard cache locations.
 
 ## How it works (two passes, one loaded model)
 
@@ -86,13 +105,33 @@ VLM Model Loader feeding the analyzer node.
 python_embeded\python.exe ComfyUI\custom_nodes\ComfyUI-VideoAnalyzer\test\test_e2e.py
 ::    options: --videos 8,9  --mode FL2VA|I2VA|L2VA|LTX|T2VA  --model <catalog label>
 
+:: comprehensive pre-release matrix (25 cases: modes, durations, sampling,
+:: audio options, fade handling, synthetic no-audio/vertical/1s videos, negative cases)
+python_embeded\python.exe ComfyUI\custom_nodes\ComfyUI-VideoAnalyzer\test\test_matrix.py
+::    --quick for the first 12 cases
+
 :: full-stack test through a running ComfyUI server (port 8188)
-python_embeded\python.exe ComfyUI\custom_nodes\ComfyUI-VideoAnalyzer\test\test_workflow_api.py --clip 8
+python_embeded\python.exe ComfyUI\custom_nodes\ComfyUI-VideoAnalyzer\test\test_workflow_api.py --clip 8 [--mode LTX]
 ```
 
-Results (Adobe Premiere 26.0 sample media, 17 clips, RTX 5090, in-process
-Qwen2.5-VL-7B): **17/17 T2VA**, FL2VA x2 / I2VA x1 / LTX x1 spot checks, and
-ComfyUI `/prompt` API integration PASS.
+Test paths can be overridden with `H3_TEST_VIDEOS` and `COMFYUI_ROOT` environment
+variables for non-Windows machines.
+
+Results (Adobe Premiere 26.0 sample media + 5 synthetic clips, RTX 5090,
+in-process Qwen2.5-VL-7B, ComfyUI 0.36):
+
+- **test_matrix: 25/25 PASS** — 7 mode cases (T2VA/I2VA/FL2VA/L2VA/LTX,
+  single- and multi-shot), duration clamps/snap + 2 negative validation cases,
+  frame_fps/max_frames/frame_max_side/max_seconds sampling checks, ASR/audio-tag
+  toggles, tags_threshold/tags_max, keep_fade, fade-trim on a fade-in/out clip,
+  silent video, vertical video, 1-second video, 720p video
+- **test_e2e: 17/17 PASS** (T2VA over every sample clip)
+- **full-stack `/prompt` API: PASS** — T2VA and LTX, including `unload_vlm=true`
+  reload cycles
+- **auto-download verified for all three model types**: VLM (fresh catalog model
+  downloaded into `ComfyUI/models/LLavacheckpoints/`), faster-whisper (tiny +
+  small re-downloaded after cache deletion), PANNs weights (re-downloaded after
+  deletion)
 
 ## Credits
 

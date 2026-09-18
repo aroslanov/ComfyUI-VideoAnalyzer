@@ -3,18 +3,22 @@
 #   python_embeded\python.exe test\test_e2e.py [--mode T2VA] [--videos 1,2,3] [--max-seconds 30]
 # Loads the VLM in-process via ComfyUI_VLM_nodes (auto-downloads on first run).
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+COMFY_ROOT = Path(os.environ.get("COMFYUI_ROOT", "F:/ComfyUI/ComfyUI"))
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, r"F:\ComfyUI\ComfyUI")  # comfy package
-sys.path.insert(0, r"F:\ComfyUI\ComfyUI\custom_nodes")  # ComfyUI_VLM_nodes
+sys.path.insert(0, str(COMFY_ROOT))  # comfy package
+sys.path.insert(0, str(COMFY_ROOT / "custom_nodes"))  # ComfyUI_VLM_nodes
 
 from pipeline import H3PipelineError, video_to_prompt  # noqa: E402
 
-DEFAULT_VIDEOS = Path(r"C:\Users\Public\Documents\Adobe\Premiere Pro\26.0\Sample Media")
+DEFAULT_VIDEOS = Path(os.environ.get(
+    "H3_TEST_VIDEOS",
+    r"C:\Users\Public\Documents\Adobe\Premiere Pro\26.0\Sample Media"))
 OUT_DIR = ROOT / "out"
 H3_FIELDS = ("integrated_multimodal_description", "overall_soundscape", "non_diegetic_music")
 DEFAULT_MODEL_LABEL = "Qwen 2.5 VL 7B Instruct (legacy workflows)"

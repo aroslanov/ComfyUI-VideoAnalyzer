@@ -18,7 +18,8 @@ API_FORMAT = {
         "max_seconds": 0.0,
         "keep_fade": False, "frame_fps": 1.0, "max_frames": 24, "frame_max_side": 512,
         "use_asr": True, "asr_model": "small", "use_audio_tags": True,
-        "tags_threshold": 0.05, "tags_max": 12, "max_new_tokens": 8192}},
+        "tags_threshold": 0.05, "tags_max": 12, "max_new_tokens": 8192,
+        "unload_vlm": True}},
     "4": {"class_type": "ViewText", "inputs": {"text": ["3", 0]}},
 }
 
@@ -27,10 +28,12 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--comfy", default="http://127.0.0.1:8188")
     ap.add_argument("--clip", default="16")
+    ap.add_argument("--mode", default="T2VA")
     args = ap.parse_args()
 
     prompt = json.loads(json.dumps(API_FORMAT))
     prompt["1"]["inputs"]["file"] = f"Sample Media Clip {args.clip}.mp4"
+    prompt["3"]["inputs"]["mode"] = args.mode
 
     req = urllib.request.Request(
         f"{args.comfy}/prompt",
@@ -52,8 +55,11 @@ def main() -> None:
         status = entry.get("status", {})
         if status.get("completed"):
             text = entry["outputs"]["4"]["text"][0]
-            ok = all(f in text for f in ("integrated_multimodal_description",
-                                         "overall_soundscape", "non_diegetic_music"))
+            if args.mode == "LTX":
+                ok = len(text.split()) >= 20 and "integrated_multimodal_description" not in text
+            else:
+                ok = all(f in text for f in ("integrated_multimodal_description",
+                                             "overall_soundscape", "non_diegetic_music"))
             print(("PASS" if ok else "FAIL") + f" ({len(text)} chars)")
             print("---")
             print(text)

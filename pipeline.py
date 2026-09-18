@@ -36,6 +36,17 @@ class H3PipelineError(RuntimeError):
     pass
 
 
+def _device_hint(e: RuntimeError) -> H3PipelineError:
+    if "same device" in str(e) or "index_select" in str(e):
+        return H3PipelineError(
+            "the VLM was partially loaded because there was not enough free VRAM "
+            "(this happens when other models are resident). Free VRAM (unload other "
+            "models) or select a smaller model / the 4-bit memory mode in "
+            "VLM Model Loader (H3)."
+        )
+    return H3PipelineError(str(e))
+
+
 def log(msg: str) -> None:
     print(f"[h3] {msg}", flush=True)
 
@@ -205,7 +216,10 @@ def text_generate(predictor, prompt: str, max_new_tokens: int,
     if temperature > 0:
         generation.update(temperature=temperature, top_p=TOP_P)
     with torch.inference_mode(), inference_context(device, predictor.dtype):
-        output = model.generate(**inputs, **generation)
+        try:
+            output = model.generate(**inputs, **generation)
+        except RuntimeError as e:
+            raise _device_hint(e)
     n = inputs["input_ids"].shape[-1]
     return predictor.processor.batch_decode(
         output[:, n:], skip_special_tokens=True, clean_up_tokenization_spaces=False,
@@ -433,16 +447,19 @@ def run_analysis(predictor, frames: list, transcript: str | None,
         )
     video_batch = frames_to_tensor(frames)
     log(f"analyzing {len(frames)} frames (native video input)...")
-    raw = predictor.generate(
-        images=None,
-        prompt=text,
-        system_prompt="",
-        max_new_tokens=max_new_tokens,
-        temperature=TEMPERATURE,
-        top_p=TOP_P,
-        video_frames=video_batch,
-        fps=frame_fps,
-    )
+    try:
+        raw = predictor.generate(
+            images=None,
+            prompt=text,
+            system_prompt="",
+            max_new_tokens=max_new_tokens,
+            temperature=TEMPERATURE,
+            top_p=TOP_P,
+            video_frames=video_batch,
+            fps=frame_fps,
+        )
+    except RuntimeError as e:
+        raise _device_hint(e)
     try:
         return extract_json(raw)
     except (ValueError, json.JSONDecodeError) as e:
