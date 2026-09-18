@@ -141,9 +141,12 @@ class MiniMaxH3VideoToPrompt(io.ComfyNode):
                              tooltip="Max side of each sampled frame before the model's own processing."),
                 io.Boolean.Input("use_asr", default=True,
                                  tooltip="Transcribe the audio with faster-whisper for dialogue/lyrics."),
-                io.String.Input("asr_model", default=DEFAULT_ASR_MODEL, advanced=True,
-                                tooltip="faster-whisper model name (tiny/base/small/medium/large-v3-turbo "
-                                        "or a HuggingFace repo id)."),
+                io.Combo.Input("asr_model",
+                               options=["tiny", "base", "small", "medium",
+                                        "large-v3", "large-v3-turbo"],
+                               default=DEFAULT_ASR_MODEL, advanced=True,
+                               tooltip="faster-whisper model size; larger is more accurate "
+                                       "but slower and downloads more on first use."),
                 io.Boolean.Input("use_audio_tags", default=True,
                                  tooltip="Tag the audio with PANNs/AudioSet (requires panns-inference)."),
                 io.Float.Input("tags_threshold", default=DEFAULT_TAG_THRESHOLD, min=0.0, max=1.0,
