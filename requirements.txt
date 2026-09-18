@@ -1,2 +1,3 @@
 faster-whisper
 panns-inference
+json-repair

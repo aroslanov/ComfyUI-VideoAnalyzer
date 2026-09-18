@@ -217,11 +217,11 @@ class LLMClient:
         return headers
 
     def chat(self, messages: list, max_tokens: int, retries: int = 2,
-             timeout: tuple = (15, 900)) -> str:
+             timeout: tuple = (15, 900), temperature: float | None = None) -> str:
         payload = {
             "model": self.model,
             "messages": messages,
-            "temperature": self.temperature,
+            "temperature": self.temperature if temperature is None else temperature,
             "max_tokens": max_tokens,
         }
         last_err = None
@@ -257,7 +257,17 @@ def extract_json(text: str) -> dict:
         if start == -1 or end <= start:
             raise ValueError("JSON block not found")
         text = text[start:end + 1]
-    return json.loads(text)
+    # common small-model slip: trailing commas
+    text = re.sub(r",\s*([}\]])", r"\1", text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # last resort for small models: unescaped quotes, missing brackets etc.
+        import json_repair
+        repaired = json_repair.loads(text)
+        if isinstance(repaired, dict):
+            return repaired
+        raise
 
 
 # ---------------------------------------------------------------------------
@@ -465,7 +475,7 @@ def run_analysis(client: LLMClient, video_b64: str, transcript: str | None,
             {"role": "user",
              "content": "The output above is not valid JSON. Re-output only valid JSON following the schema. No code fences."},
         ]
-        raw2 = client.chat(retry_messages, max_tokens=8192)
+        raw2 = client.chat(retry_messages, max_tokens=8192, temperature=0.6)
         return extract_json(raw2)
 
 
@@ -513,7 +523,7 @@ def run_analysis_frames(client: LLMClient, frames: list, transcript: str | None,
             {"role": "user",
              "content": "The output above is not valid JSON. Re-output only valid JSON following the schema. No code fences."},
         ]
-        raw2 = client.chat(retry_messages, max_tokens=8192)
+        raw2 = client.chat(retry_messages, max_tokens=8192, temperature=0.6)
         return extract_json(raw2)
 
 
@@ -723,20 +733,14 @@ def strip_stray_tags(text: str) -> str:
     return re.sub(r"</?[a-zA-Z][a-zA-Z0-9 _-]*>", _keep, text)
 
 
-def run_rewrite(client: LLMClient, mode: str, duration: float, analysis: dict,
-                guide_text: str, transcript: str | None,
-                tags: list | None = None) -> str:
-    prompt = build_rewrite_prompt(mode, duration, analysis, guide_text, transcript,
-                                  tags=tags)
-    messages = [{"role": "user", "content": prompt}]
-    raw = client.chat(messages, max_tokens=8192)
+def _validate_rewrite(raw: str, mode: str) -> str:
     m = re.search(r"```(?:text|prompt)?\s*(.*?)\s*```", raw, re.DOTALL)
     if m:
         raw = m.group(1)
     raw = raw.strip()
     if mode == "LTX":
         if len(raw.split()) < 20:
-            die(f"LLM output too short for an LTX prompt. Re-run the node.\n---\n{raw[:800]}")
+            die(f"LLM output too short for an LTX prompt: {len(raw.split())} words")
         quoted = (re.findall(r'"([^"]*)"', raw)
                   + re.findall(r"'([^']*)'", raw)
                   + re.findall(r"「([^」]*)」", raw))
@@ -752,12 +756,36 @@ def run_rewrite(client: LLMClient, mode: str, duration: float, analysis: dict,
     for field in fields:
         pos = raw.find(field + ":")
         if pos < 0:
-            die(f"LLM output missing '{field}:'. Re-run the node.\n---\n{raw[:800]}")
+            die(f"LLM output missing '{field}:'")
         positions.append(pos)
     if positions != sorted(positions):
-        die(f"LLM output has wrong 3-field order (pos={positions}). Re-run the node.\n---\n{raw[:800]}")
-    raw = format_shot_breaks(raw)
-    return raw
+        die(f"LLM output has wrong 3-field order (pos={positions})")
+    return format_shot_breaks(raw)
+
+
+def run_rewrite(client: LLMClient, mode: str, duration: float, analysis: dict,
+                guide_text: str, transcript: str | None,
+                tags: list | None = None) -> str:
+    prompt = build_rewrite_prompt(mode, duration, analysis, guide_text, transcript,
+                                  tags=tags)
+    messages = [{"role": "user", "content": prompt}]
+    last_err = None
+    # small local models sometimes ramble or drop a field; one corrective retry
+    for attempt in range(2):
+        raw = client.chat(messages, max_tokens=8192)
+        try:
+            return _validate_rewrite(raw, mode)
+        except H3PipelineError as e:
+            last_err = e
+            log(f"rewrite validation failed ({e}); retrying with correction")
+            messages = messages + [
+                {"role": "assistant", "content": raw},
+                {"role": "user",
+                 "content": f"Your output was invalid: {e}\n"
+                            "Re-output ONLY the required fields with no commentary, no code fences, "
+                            "keeping every required field name exactly."},
+            ]
+    die(f"LLM rewrite failed validation twice: {last_err}")
 
 
 def resolve_duration(mode: str, requested: float | None, effective_len: float) -> float:

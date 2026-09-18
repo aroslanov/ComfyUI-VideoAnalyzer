@@ -1,0 +1,146 @@
+{
+  "id": "a1b2c3d4-0000-4000-8000-h3video2prompt",
+  "revision": 0,
+  "last_node_id": 4,
+  "last_link_id": 3,
+  "nodes": [
+    {
+      "id": 1,
+      "type": "LoadVideo",
+      "pos": [80, 240],
+      "size": [320, 160],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "VIDEO",
+          "type": "VIDEO",
+          "links": [1],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "LoadVideo"
+      },
+      "widgets_values": [
+        "Sample Media Clip 1.mp4"
+      ]
+    },
+    {
+      "id": 2,
+      "type": "H3VLMModelLoader",
+      "pos": [80, 460],
+      "size": [360, 190],
+      "flags": {},
+      "order": 1,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "vlm",
+          "type": "VLM_MODEL",
+          "links": [2],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "H3VLMModelLoader"
+      },
+      "widgets_values": [
+        "http://127.0.0.1:8777/v1",
+        "qwen2.5-vl-3b-instruct",
+        "",
+        0.2
+      ]
+    },
+    {
+      "id": 3,
+      "type": "MiniMaxH3VideoToPrompt",
+      "pos": [520, 240],
+      "size": [400, 480],
+      "flags": {},
+      "order": 2,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "video",
+          "type": "VIDEO",
+          "link": 1
+        },
+        {
+          "name": "vlm",
+          "type": "VLM_MODEL",
+          "link": 2
+        }
+      ],
+      "outputs": [
+        {
+          "name": "Minimax H3 Prompt",
+          "type": "STRING",
+          "links": [3],
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "MiniMaxH3VideoToPrompt"
+      },
+      "widgets_values": [
+        "T2VA",
+        0.0,
+        "frames",
+        480,
+        0.0,
+        false,
+        1.0,
+        32,
+        768,
+        true,
+        "small",
+        true,
+        0.05,
+        12
+      ]
+    },
+    {
+      "id": 4,
+      "type": "ShowH3Prompt",
+      "pos": [1000, 240],
+      "size": [460, 380],
+      "flags": {},
+      "order": 3,
+      "mode": 0,
+      "inputs": [
+        {
+          "name": "prompt",
+          "type": "STRING",
+          "link": 3
+        }
+      ],
+      "outputs": [
+        {
+          "name": "STRING",
+          "type": "STRING",
+          "links": null,
+          "slot_index": 0
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "ShowH3Prompt"
+      },
+      "widgets_values": []
+    }
+  ],
+  "links": [
+    [1, 1, 0, 3, 0, "VIDEO"],
+    [2, 2, 0, 3, 1, "VLM_MODEL"],
+    [3, 3, 0, 4, 0, "STRING"]
+  ],
+  "groups": [],
+  "config": {},
+  "extra": {
+    "note": "VLM Model Loader (H3) points at a local llama.cpp server: llama-server -m Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf --mmproj mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf -ngl 99 -c 32768 --port 8777"
+  },
+  "version": 0.4
+}
