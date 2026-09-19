@@ -150,10 +150,11 @@ pipeline port, robustness handling, workflows, and tests.
 
 - Pipeline and prompt guides: based on
   [knishika62/video-analyzer](https://github.com/knishika62/video-analyzer)
-  — the reference implementation this port derives from. **That repository
-  carries no open-source license** (all rights reserved by its author); the
-  port contains substantial modifications. If you need strict legal certainty
-  for redistribution of the derived parts, contact the upstream author.
+  by Kazuhisa Nishikawa — the reference implementation this port derives from,
+  licensed under the **MIT License** (added upstream in September 2026 at this
+  port's request; the author also granted permission via email). The port
+  contains substantial modifications (Windows/ComfyUI integration, in-process
+  VLM loading, robustness handling).
 - H3 prompt spec and the bundled prompt guides (`md/`): derived from the
   [MiniMax-AI/MiniMax-H3](https://github.com/MiniMax-AI/MiniMax-H3) project
   documentation (also without a detected SPDX license; included with

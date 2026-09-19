@@ -24,8 +24,9 @@ SOFTWARE.
 
 Third-party notice: this pack ports ideas and pipeline structure from
 knishika62/video-analyzer (https://github.com/knishika62/video-analyzer),
-which at the time of porting carried no open-source license, and includes
-prompt guides derived from the MiniMax-AI/MiniMax-H3 project documentation
-(https://github.com/MiniMax-AI/MiniMax-H3). Those upstream works remain the
-property of their respective authors; see README.md ("License and credits")
-for details.
+which is licensed under the MIT License by Kazuhisa Nishikawa (as of
+September 2026; permission for this port was also kindly granted via email),
+and includes prompt guides derived from the MiniMax-AI/MiniMax-H3 project
+documentation (https://github.com/MiniMax-AI/MiniMax-H3). Those upstream
+works remain the property of their respective authors; see README.md
+("License and credits") for details.
