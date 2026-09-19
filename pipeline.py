@@ -37,7 +37,10 @@ class H3PipelineError(RuntimeError):
 
 
 def _device_hint(e: RuntimeError) -> H3PipelineError:
-    from .vlm import VRAM_HINT
+    try:
+        from .vlm import VRAM_HINT
+    except ImportError:  # direct (script) import of this module
+        from vlm import VRAM_HINT
 
     s = str(e)
     if "same device" in s or "index_select" in s or VRAM_HINT in s:
@@ -770,6 +773,24 @@ def _fix_field_labels(text: str) -> str:
     return text
 
 
+_JUNK_LINE = re.compile(r"^\s*(```|addCriterion|import\s|def\s|#|\{|//|<\w)")
+
+
+def _trim_field_content(content: str, blank_line_cuts: bool) -> str:
+    """Cut a field's content at injected garbage (fences, addCriterion calls,
+    stray code). For SOUNDSCAPE/MUSIC (1-3 sentences) a blank line also ends
+    the content; [DESCRIPTION] keeps blank lines (multi-shot blocks)."""
+    lines = content.splitlines()
+    out = []
+    for line in lines:
+        if _JUNK_LINE.match(line):
+            break
+        if blank_line_cuts and line.strip() == "" and out:
+            break
+        out.append(line)
+    return "\n".join(out).strip()
+
+
 _MARKERS = (("DESCRIPTION", "integrated_multimodal_description"),
             ("SOUNDSCAPE", "overall_soundscape"),
             ("MUSIC", "non_diegetic_music"))
@@ -785,8 +806,29 @@ def _markers_to_fields(raw: str) -> str | None:
         sections[parts[i]] = parts[i + 1].strip()
     if len(sections) != 3 or not all(sections.get(name) for name, _ in _MARKERS):
         return None
-    return "\n\n".join(f"{field}: {sections[name]}"
-                       for name, field in _MARKERS)
+    return "\n\n".join(
+        f"{field}: {_trim_field_content(sections[name], blank_line_cuts=name != 'DESCRIPTION')}"
+        for name, field in _MARKERS)
+
+
+def _trim_canonical_fields(raw: str) -> str:
+    """Same garbage cut for canonical-label outputs (attempt-3 style)."""
+    fields = ("integrated_multimodal_description", "overall_soundscape",
+              "non_diegetic_music")
+    positions = []
+    for field in fields:
+        pos = raw.find(field + ":")
+        if pos < 0:
+            return raw
+        positions.append((field, pos))
+    rebuilt = []
+    for i, (field, pos) in enumerate(positions):
+        start = pos + len(field) + 1
+        end = positions[i + 1][1] if i + 1 < len(positions) else len(raw)
+        blank_cuts = field != "integrated_multimodal_description"
+        content = _trim_field_content(raw[start:end], blank_cuts)
+        rebuilt.append(f"{field}: {content}")
+    return "\n\n".join(rebuilt)
 
 
 def _validate_rewrite(raw: str, mode: str) -> str:
@@ -805,6 +847,7 @@ def _validate_rewrite(raw: str, mode: str) -> str:
         if assembled is not None:
             raw = assembled
     if mode == "LTX":
+        raw = _trim_field_content(raw, blank_line_cuts=False)
         if len(raw.split()) < 20:
             die(f"LLM output too short for an LTX prompt: {len(raw.split())} words")
         quoted = (re.findall(r'"([^"]*)"', raw)
@@ -817,6 +860,7 @@ def _validate_rewrite(raw: str, mode: str) -> str:
     raw = strip_alignment_line(raw)
     raw = strip_stray_tags(raw)
     raw = _fix_field_labels(raw)
+    raw = _trim_canonical_fields(raw)
     fields = ("integrated_multimodal_description", "overall_soundscape",
               "non_diegetic_music")
     positions = []
