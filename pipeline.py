@@ -16,6 +16,7 @@ import statistics
 import subprocess
 import tempfile
 import time
+from typing import NoReturn
 from pathlib import Path
 
 KEYFRAME_MODES = ("I2VA", "FL2VA", "L2VA")
@@ -52,7 +53,7 @@ def log(msg: str) -> None:
     print(f"[h3] {msg}", flush=True)
 
 
-def die(msg: str) -> None:
+def die(msg: str) -> NoReturn:
     raise H3PipelineError(msg)
 
 
