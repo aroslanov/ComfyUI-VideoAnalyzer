@@ -12,6 +12,8 @@ by analyzing it with a vision-language model.
 > repository. The H3 prompt spec itself comes from
 > [MiniMax-AI/MiniMax-H3](https://github.com/MiniMax-AI/MiniMax-H3).
 
+![ComfyUI workflow: Load Video -> MiniMax H3 Video to Prompt -> View Text](assets/screenshot.png)
+
 **Fully self-contained**: the VLM runs inside ComfyUI via
 [ComfyUI_VLM_nodes](https://github.com/gokayfem/ComfyUI_VLM_nodes) — no
 llama-server / LM Studio / API keys. The model auto-downloads from HuggingFace
