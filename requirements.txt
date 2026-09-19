@@ -1,4 +1,10 @@
-faster-whisper
-panns-inference
-json-repair
-# plus: ComfyUI_VLM_nodes (sibling custom node pack, see README) with its own requirements.txt
+# Tested with ComfyUI 0.36 portable (torch 2.13 + cu130, numpy 2.5, transformers 5.15).
+# All three packages install additively: they do not upgrade or downgrade any
+# ComfyUI core dependency (verified with `pip check` against ComfyUI's own
+# requirements.txt). Bounds reflect the tested versions.
+faster-whisper>=1.1,<2        # 1.2.1 tested; pulls ctranslate2/onnxruntime (additive)
+panns-inference>=0.1.1,<0.2   # 0.1.1 tested; pulls librosa/numba/matplotlib (additive, numpy-2 compatible)
+json-repair>=0.30,<1          # 0.63.4 tested; no dependencies
+# The vision-language model stack comes from the sibling pack, which has its own
+# bounded requirements: see ComfyUI_VLM_nodes/requirements.txt (transformers>=5.4,
+# accelerate, qwen-vl-utils, ...). Install it first — see README.

@@ -92,6 +92,13 @@ python_embeded\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-VideoAn
 Requires `ffmpeg`/`ffprobe` in PATH. First execution of the VLM loader
 downloads the selected model (Qwen2.5-VL-7B ≈ 16 GB) — watch the console.
 
+**Dependency safety:** both requirement sets install additively — they do not
+upgrade or downgrade any ComfyUI core dependency (torch, numpy, transformers,
+safetensors, av, ...). Verified with `pip check` against ComfyUI 0.36's own
+`requirements.txt` plus a clean server boot with zero custom-node import
+failures. Version bounds in both `requirements.txt` files reflect the tested
+versions.
+
 ## Workflow
 
 Load `workflows/h3_video2prompt_sample.json` in ComfyUI:
