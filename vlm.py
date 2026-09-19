@@ -281,40 +281,50 @@ class VLMPredictor:
         self.processor = None
 
     def _inputs(self, messages, video_metadata=None):
-        """Chat template with the Qwen video pathway, older-template fallback."""
-        processor_kwargs = (
-            {
-                "video_metadata": [[video_metadata]],
-                # ComfyUI already supplied the selected frames as a batch.
-                "do_sample_frames": False,
-            }
-            if video_metadata is not None
-            else None
-        )
-        try:
-            return self.processor.apply_chat_template(
-                messages, add_generation_prompt=True, tokenize=True,
-                return_dict=True, return_tensors="pt",
-                processor_kwargs=processor_kwargs,
+        """Chat template with the Qwen video pathway, older-template fallback.
+
+        Video timing metadata is version-dependent: transformers >=5 wants it
+        nested inside a `processor_kwargs` dict, while 4.5x takes
+        video_metadata/do_sample_frames as direct top-level kwargs. Both are
+        tried before falling back to a metadata-less multi-image call (which
+        makes shot timestamps approximate)."""
+        if video_metadata is not None:
+            attempts = (
+                {"processor_kwargs": {
+                    "video_metadata": [[video_metadata]],
+                    "do_sample_frames": False}},
+                {"video_metadata": [[video_metadata]],
+                 "do_sample_frames": False},
             )
-        except (TypeError, ValueError, KeyError):
-            media = []
-            portable_messages = []
-            for message in messages:
-                content = []
-                for part in message["content"]:
-                    if part["type"] == "image":
-                        media.append(part["image"])
-                        content.append({"type": "image"})
-                    elif part["type"] == "video":
-                        media.extend(part["video"])
-                        content.extend({"type": "image"} for _ in part["video"])
-                    else:
-                        content.append(part)
-                portable_messages.append({"role": message["role"], "content": content})
-            prompt = self.processor.apply_chat_template(
-                portable_messages, add_generation_prompt=True, tokenize=False)
-            return self.processor(text=[prompt], images=media, return_tensors="pt")
+            for kwargs in attempts:
+                try:
+                    return self.processor.apply_chat_template(
+                        messages, add_generation_prompt=True, tokenize=True,
+                        return_dict=True, return_tensors="pt", **kwargs)
+                except (TypeError, ValueError, KeyError):
+                    continue
+            log("warning: video timing metadata not applied by this transformers "
+                "version; shot timestamps may be approximate")
+
+        # portable fallback: no video metadata (still images, or unsupported
+        # transformers versions)
+        media = []
+        portable_messages = []
+        for message in messages:
+            content = []
+            for part in message["content"]:
+                if part["type"] == "image":
+                    media.append(part["image"])
+                    content.append({"type": "image"})
+                elif part["type"] == "video":
+                    media.extend(part["video"])
+                    content.extend({"type": "image"} for _ in part["video"])
+                else:
+                    content.append(part)
+            portable_messages.append({"role": message["role"], "content": content})
+        prompt = self.processor.apply_chat_template(
+            portable_messages, add_generation_prompt=True, tokenize=False)
+        return self.processor(text=[prompt], images=media, return_tensors="pt")
 
     def _decode(self, output, input_length: int) -> str:
         return self.processor.batch_decode(

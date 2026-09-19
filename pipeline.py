@@ -653,11 +653,16 @@ Read the LTX prompt-writing guide below, then use the video analysis JSON to pro
 2. No markdown fences, no commentary, no explanations before or after the prompt.
 3. No structured field names, no image-alignment instruction lines — output ONLY the prompt body.
 4. Use present tense for actions/movement; express emotion through physical cues, not abstract labels.
-5. Dialogue / lyrics / singing go in double quotation marks in the original language; specify language/accent when needed.
-   Japanese lines must be in HIRAGANA ONLY (no kanji, no katakana).
+5. Dialogue / lyrics / singing go in double quotation marks in the original language; the language name
+   (if stated) must be the English name (e.g. "in Japanese"), never localized. Japanese lines must be in
+   HIRAGANA ONLY (no kanji, no katakana).
 6. If there are multiple shots (2-4), keep them in one chronological paragraph with explicit transition language at each cut and stated audio continuity.
 7. Do not invent on-screen text, brands, or logos. If the source has readable text, keep it short.
-8. If there is no dialogue, no singing, and no on-screen speaking source, do not invent any.
+8. The analysis JSON's dialogue entries (and the ground-truth transcript above, if provided) are real
+   speech that was actually heard — render every one of those lines as quoted dialogue at its correct
+   timestamp. This applies whether the speaker is on-screen or off-screen (voiceover/narration); do not
+   skip a line just because no speaker is visibly on screen. Only skip inventing dialogue when the
+   analysis has zero dialogue entries, no singing, and no transcript was provided.
 """
 
     if output_style == "canonical":
@@ -666,8 +671,16 @@ Read the LTX prompt-writing guide below, then use the video analysis JSON to pro
 3. Preserve the exact field names: integrated_multimodal_description, overall_soundscape, non_diegetic_music.
 4. Never output the image-alignment instruction line ("For the target video..." or "How the reference pictures align...") — the tool adds it.
 5. For keyframe modes, reference <Picture 1>/Picture 2 in the shot descriptions.
-6. Dialogue inside <d>[Language] ... </d> must keep the original language verbatim.
-7. If there is no dialogue, no singing, and no on-screen speaking source, do not invent any <d> blocks.
+6. Dialogue inside <d>[Language] ... </d> must keep the original language verbatim. Tags use ANGLE
+   brackets: <d>[Japanese] ... </d> — never square brackets like [d]. The [Language] tag itself must
+   always be the English name of the language (e.g. "[Japanese]", "[English]", "[Korean]"), never
+   translated/localized (do not write "[日本語]" or similar) — only the dialogue text stays in its
+   original language.
+7. The analysis JSON's dialogue entries (and the ground-truth transcript above, if provided) are real
+   speech that was actually heard — render every one of those lines as a <d> block at its correct
+   timestamp, whether the speaker is on-screen or off-screen (voiceover/narration); do not skip a line
+   just because no speaker is visibly on screen. Only skip adding <d> blocks when the analysis has zero
+   dialogue entries, no singing, and no transcript was provided.
 8. overall_soundscape: 1-4 sentences; non_diegetic_music: 1-3 sentences or "N/A".
 9. For overall_soundscape, infer plausible ambient/physical/non-verbal sounds from the visual content (weather, locations, actions, crowds). Use "N/A" only when the scene truly has no plausible sound source.
 """
@@ -677,8 +690,16 @@ Read the LTX prompt-writing guide below, then use the video analysis JSON to pro
 3. Never write the long field names (integrated_multimodal_description, overall_soundscape, non_diegetic_music) — the tool converts markers to the final format.
 4. Never output the image-alignment instruction line ("For the target video..." or "How the reference pictures align...") — the tool adds it.
 5. For keyframe modes, reference <Picture 1>/Picture 2 in the [DESCRIPTION] section.
-6. Dialogue inside <d>[Language] ... </d> must keep the original language verbatim.
-7. If there is no dialogue, no singing, and no on-screen speaking source, do not invent any <d> blocks.
+6. Dialogue inside <d>[Language] ... </d> must keep the original language verbatim. Tags use ANGLE
+   brackets: <d>[Japanese] ... </d> — never square brackets like [d]. The [Language] tag itself must
+   always be the English name of the language (e.g. "[Japanese]", "[English]", "[Korean]"), never
+   translated/localized (do not write "[日本語]" or similar) — only the dialogue text stays in its
+   original language.
+7. The analysis JSON's dialogue entries (and the ground-truth transcript above, if provided) are real
+   speech that was actually heard — render every one of those lines as a <d> block at its correct
+   timestamp, whether the speaker is on-screen or off-screen (voiceover/narration); do not skip a line
+   just because no speaker is visibly on screen. Only skip adding <d> blocks when the analysis has zero
+   dialogue entries, no singing, and no transcript was provided.
 8. [SOUNDSCAPE]: 1-4 sentences; [MUSIC]: 1-3 sentences or "N/A".
 9. For [SOUNDSCAPE], infer plausible ambient/physical/non-verbal sounds from the visual content (weather, locations, actions, crowds). Use "N/A" only when the scene truly has no plausible sound source.
 """
@@ -777,18 +798,27 @@ def _fix_field_labels(text: str) -> str:
 _JUNK_LINE = re.compile(r"^\s*(```|addCriterion|import\s|def\s|#|\{|//|<\w)")
 
 
-def _trim_field_content(content: str, blank_line_cuts: bool) -> str:
+def _trim_field_content(content: str, blank_line_cuts: bool,
+                        dialogue_blocks: list | None = None) -> str:
     """Cut a field's content at injected garbage (fences, addCriterion calls,
     stray code). For SOUNDSCAPE/MUSIC (1-3 sentences) a blank line also ends
-    the content; [DESCRIPTION] keeps blank lines (multi-shot blocks)."""
+    the content; [DESCRIPTION] keeps blank lines (multi-shot blocks).
+    Complete <d>...</d> dialogue blocks found in discarded lines are collected
+    so the caller can relocate them into the description."""
     lines = content.splitlines()
     out = []
-    for line in lines:
+    discarded: list = []
+    for i, line in enumerate(lines):
         if _JUNK_LINE.match(line):
+            discarded = lines[i:]
             break
         if blank_line_cuts and line.strip() == "" and out:
+            discarded = lines[i:]
             break
         out.append(line)
+    if dialogue_blocks is not None and discarded:
+        tail = "\n".join(discarded)
+        dialogue_blocks.extend(re.findall(r"<d>.*?</d>", tail, re.DOTALL))
     return "\n".join(out).strip()
 
 
@@ -807,32 +837,65 @@ def _markers_to_fields(raw: str) -> str | None:
         sections[parts[i]] = parts[i + 1].strip()
     if len(sections) != 3 or not all(sections.get(name) for name, _ in _MARKERS):
         return None
-    return "\n\n".join(
-        f"{field}: {_trim_field_content(sections[name], blank_line_cuts=name != 'DESCRIPTION')}"
+    blocks: list = []
+    out = "\n\n".join(
+        f"{field}: {_trim_field_content(sections[name], blank_line_cuts=name != 'DESCRIPTION', dialogue_blocks=blocks)}"
         for name, field in _MARKERS)
+    # relocate dialogue blocks the model misplaced outside the fields
+    missing = [b for b in blocks if b not in out]
+    if missing:
+        idx = out.find("\n\noverall_soundscape:")
+        insertion = "\n" + "\n".join(missing)
+        out = out[:idx] + insertion + out[idx:] if idx >= 0 else out + insertion
+    return out
+
+
+def _normalize_dialogue_tags(text: str) -> str:
+    """The marker-style prompt makes models mimic square brackets; dialogue
+    tags must be angle brackets."""
+    text = text.replace("[d]", "<d>").replace("[/d]", "</d>")
+    text = text.replace("< d >", "<d>").replace("</ d >", "</d>")
+    return text
+
+
+def _normalize_shot_labels(text: str) -> str:
+    """Repair shot labels missing an opening bracket ('Shot 1]') or plain
+    ('Shot 1') so format_shot_breaks sees consistent '[Shot N]' markers."""
+    def fix(m: "re.Match") -> str:
+        tail = m.group(1) if m.group(1).endswith("]") else m.group(1) + "]"
+        return "[Shot " + tail
+    return re.sub(r"(?<!\[)\bShot (\d+\]?)", fix, text)
 
 
 def _trim_canonical_fields(raw: str) -> str:
-    """Same garbage cut for canonical-label outputs (attempt-3 style)."""
+    """Same garbage cut for canonical-label outputs (attempt-3 style), with
+    fields reassembled in canonical order (models occasionally emit them
+    out of order)."""
     fields = ("integrated_multimodal_description", "overall_soundscape",
               "non_diegetic_music")
-    positions = []
+    found = []
     for field in fields:
         pos = raw.find(field + ":")
         if pos < 0:
             return raw
-        positions.append((field, pos))
-    rebuilt = []
-    for i, (field, pos) in enumerate(positions):
+        found.append((pos, field))
+    found.sort()
+    contents = {}
+    blocks: list = []
+    for i, (pos, field) in enumerate(found):
         start = pos + len(field) + 1
-        end = positions[i + 1][1] if i + 1 < len(positions) else len(raw)
+        end = found[i + 1][0] if i + 1 < len(found) else len(raw)
         blank_cuts = field != "integrated_multimodal_description"
-        content = _trim_field_content(raw[start:end], blank_cuts)
-        rebuilt.append(f"{field}: {content}")
-    return "\n\n".join(rebuilt)
+        contents[field] = _trim_field_content(raw[start:end], blank_cuts,
+                                              dialogue_blocks=blocks)
+    missing = [b for b in blocks if b not in contents["integrated_multimodal_description"]]
+    if missing:
+        contents["integrated_multimodal_description"] += "\n" + "\n".join(missing)
+    return "\n\n".join(f"{field}: {contents[field]}" for field in fields)
 
 
-def _validate_rewrite(raw: str, mode: str) -> str:
+def _validate_rewrite(raw: str, mode: str, expect_dialogue: bool = False) -> tuple:
+    """Returns (cleaned_text, dialogue_ok). Structural problems raise."""
     # only unwrap a code fence when it wraps the whole output; trailing junk
     # fences after the fields must not swallow the prompt itself
     s = raw.strip()
@@ -846,8 +909,9 @@ def _validate_rewrite(raw: str, mode: str) -> str:
     if mode != "LTX":
         assembled = _markers_to_fields(raw)
         if assembled is not None:
-            raw = assembled
+            raw = _normalize_dialogue_tags(assembled)
     if mode == "LTX":
+        raw = _normalize_dialogue_tags(raw)
         raw = _trim_field_content(raw, blank_line_cuts=False)
         if len(raw.split()) < 20:
             die(f"LLM output too short for an LTX prompt: {len(raw.split())} words")
@@ -857,11 +921,16 @@ def _validate_rewrite(raw: str, mode: str) -> str:
         bad = [q for q in quoted if re.search(r"[\u30A0-\u30FF\u3400-\u4DBF\u4E00-\u9FFF]", q)]
         if bad:
             log(f"warning: LTX dialogue contains kanji/katakana (spec: hiragana only): {bad[:3]}")
-        return raw
+        if expect_dialogue and '"' not in raw:
+            log("warning: model dropped the dialogue/singing that the transcript and "
+                "analysis contain - every transcript line should appear as quoted dialogue")
+            return raw, False
+        return raw, True
     raw = strip_alignment_line(raw)
     raw = strip_stray_tags(raw)
     raw = _fix_field_labels(raw)
     raw = _trim_canonical_fields(raw)
+    raw = _normalize_shot_labels(raw)
     fields = ("integrated_multimodal_description", "overall_soundscape",
               "non_diegetic_music")
     positions = []
@@ -872,7 +941,12 @@ def _validate_rewrite(raw: str, mode: str) -> str:
         positions.append(pos)
     if positions != sorted(positions):
         die(f"LLM output has wrong 3-field order (pos={positions})")
-    return format_shot_breaks(raw)
+    if expect_dialogue and "<d>" not in raw:
+        log("warning: model dropped the dialogue/singing that the transcript and "
+            "analysis contain - every transcript line should appear as a "
+            "<d>[Language] ... </d> block")
+        return raw, False
+    return format_shot_breaks(raw), True
 
 
 def run_rewrite(predictor, mode: str, duration: float, analysis: dict,
@@ -881,27 +955,48 @@ def run_rewrite(predictor, mode: str, duration: float, analysis: dict,
                 out_dir: Path | None = None) -> str:
     prompt = build_rewrite_prompt(mode, duration, analysis, guide_text, transcript,
                                   tags=tags)
+    expect_dialogue = bool((transcript and transcript.strip())
+                           or analysis.get("dialogue"))
     last_err = None
-    # ~2-4% of generations from a 7B model hit a stochastic glitch (early EOS,
-    # injected garbage tokens, label dodging); retry hotter and alternate the
-    # output format (markers / canonical labels) since degeneration is
-    # prompt-dependent
-    for attempt in range(3):
-        output_style = "canonical" if attempt == 2 else "markers"
+    best: tuple | None = None  # (text, dialogue_ok) from structurally valid attempts
+    styles = ("markers", "markers", "canonical", "canonical")
+    temps = (TEMPERATURE, 0.6, 0.6, 0.9)
+    hint = ""
+    for attempt in range(4):
         prompt = build_rewrite_prompt(mode, duration, analysis, guide_text,
                                       transcript, tags=tags,
-                                      output_style=output_style)
+                                      output_style=styles[attempt])
+        if hint:
+            prompt = hint + "\n\n" + prompt
         raw = text_generate(predictor, prompt, max_new_tokens,
-                            temperature=TEMPERATURE if attempt == 0 else 0.6)
+                            temperature=temps[attempt])
         try:
-            return _validate_rewrite(raw, mode)
+            text, dialogue_ok = _validate_rewrite(raw, mode,
+                                                  expect_dialogue=expect_dialogue)
         except H3PipelineError as e:
             last_err = e
             if out_dir is not None:
                 (out_dir / f"rewrite_failed_{attempt + 1}.txt").write_text(
                     raw + "\n", encoding="utf-8")
             log(f"rewrite validation failed ({e}); retrying with correction")
-    die(f"LLM rewrite failed validation 3 times: {last_err}")
+            continue
+        if dialogue_ok:
+            return text
+        # structurally valid but the model dropped the dialogue; keep the best
+        # attempt and retry with an explicit instruction
+        best = (text, dialogue_ok)
+        hint = ("IMPORTANT: the source video HAS dialogue/singing (see the analysis "
+                "JSON's dialogue entries and the transcript). You MUST render every "
+                "transcript line as quoted dialogue (<d>[Language] ... </d> for H3 modes, "
+                "\"...\" for LTX) at its timestamp. Do not omit it.")
+    if best is not None:
+        # dialogue-drop is a soft failure: whisper transcripts can be false
+        # positives (instrumental clips), so prefer the structured output over
+        # failing the whole node; transcript.txt is saved for manual fixes
+        log("warning: dialogue could not be rendered after several attempts; "
+            "the output may be missing dialogue (see transcript.txt)")
+        return best[0]
+    die(f"LLM rewrite failed validation 4 times: {last_err}")
 
 
 def resolve_duration(mode: str, requested: float | None, effective_len: float) -> float:
