@@ -22,6 +22,10 @@ residency is managed by ComfyUI's model manager (smart loading/offloading).
 
 ## Nodes
 
+> **Requires the [ComfyUI_VLM_nodes](https://github.com/gokayfem/ComfyUI_VLM_nodes)
+> pack** (see Setup) — both of our nodes call its in-process VLM machinery, and
+> its **View Text (Streaming)** node is used for display in the sample workflow.
+
 | Node | Inputs | Outputs |
 |------|--------|---------|
 | **VLM Model Loader (H3)** | model picker, custom_model_id, memory_mode, attention_mode | `VLM_MODEL` |
