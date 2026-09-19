@@ -355,8 +355,6 @@ class VLMPredictor:
                  max_new_tokens: int = 4096, temperature: float = 0.2,
                  top_p: float = 0.9, video_frames=None, fps: float = 1.0) -> str:
         """One generation over a frame batch (video pathway) or per still image."""
-        from PIL import Image as PILImage
-
         still_images = tensor_batch_to_pil(images) if images is not None else []
         video = tensor_batch_to_pil(video_frames) if video_frames is not None else None
         if video is None and not still_images:

@@ -1,7 +1,6 @@
 # ComfyUI-VideoAnalyzer
 # Video -> MiniMax H3 / LTX-2.5 prompt generation nodes for ComfyUI.
 # Based on https://github.com/knishika62/video-analyzer
-import asyncio
 from typing_extensions import override
 from comfy_api.latest import ComfyExtension, io
 

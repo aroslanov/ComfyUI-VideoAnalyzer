@@ -138,6 +138,17 @@ in-process Qwen2.5-VL-7B, ComfyUI 0.36):
   small re-downloaded after cache deletion), PANNs weights (re-downloaded after
   deletion)
 
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| `ffmpeg not found in PATH` | Install ffmpeg and restart ComfyUI ([gyan.dev builds](https://www.gyan.dev/ffmpeg/builds/) on Windows, `apt install ffmpeg` / `brew install ffmpeg` elsewhere). |
+| Run fails with "not enough free VRAM" | The 7B model needs ~16 GB while resident. Unload other models (or use `unload_vlm` on the analyzer), pick a smaller catalog model (3B ≈ 7 GB, Qwen3-VL-2B ≈ 5 GB), or use the `CPU` memory mode (slow). |
+| First run is slow | It downloads the selected model (~16 GB for the 7B, ~5 GB for Qwen3-VL-2B) — one time only. |
+| ASR downloads a model on first use | faster-whisper fetches its model (small ≈ 460 MB) automatically on the first clip with audio. |
+| Occasional "rewrite failed validation" / node error | Small samples of local-model sampling noise; requeue the workflow. Failures are retried automatically 3x with different sampling before surfacing. |
+| Where are the intermediate files? | `<ComfyUI temp>/h3_video2prompt/` — `analysis.json`, `frames/`, `keyframes/`, `transcript.txt`, `prompt.txt`, failure dumps. |
+
 ## License and credits
 
 This pack is licensed under the **MIT License** (see

@@ -8,7 +8,7 @@ import threading
 from pathlib import Path
 
 import folder_paths
-from comfy_api.latest import io, ui, InputImpl, Types
+from comfy_api.latest import io, ui, Types
 
 from . import pipeline
 from .pipeline import DEFAULT_ASR_MODEL, DEFAULT_TAG_THRESHOLD, DEFAULT_TAG_MAX
