@@ -4,3 +4,4 @@ out/
 *.pyc
 .roam/
 .serena/
+.roamignore
