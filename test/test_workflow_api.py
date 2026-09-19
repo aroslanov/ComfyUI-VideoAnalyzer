@@ -9,7 +9,7 @@ import urllib.request
 API_FORMAT = {
     "1": {"class_type": "LoadVideo", "inputs": {"file": ""}},
     "2": {"class_type": "H3VLMModelLoader", "inputs": {
-        "model": "Qwen 2.5 VL 7B Instruct (legacy workflows)",
+        "model": "Qwen 2.5 VL 7B Instruct",
         "custom_model_id": "",
         "memory_mode": "ComfyUI managed (BF16)",
         "attention_mode": "Auto (SDPA)"}},
@@ -20,7 +20,7 @@ API_FORMAT = {
         "use_asr": True, "asr_model": "small", "use_audio_tags": True,
         "tags_threshold": 0.05, "tags_max": 12, "max_new_tokens": 8192,
         "unload_vlm": True}},
-    "4": {"class_type": "ViewText", "inputs": {"text": ["3", 0]}},
+    "4": {"class_type": "PreviewAny", "inputs": {"source": ["3", 0]}},
 }
 
 

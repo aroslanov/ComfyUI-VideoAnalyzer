@@ -37,14 +37,12 @@ class H3PipelineError(RuntimeError):
 
 
 def _device_hint(e: RuntimeError) -> H3PipelineError:
-    if "same device" in str(e) or "index_select" in str(e):
-        return H3PipelineError(
-            "the VLM was partially loaded because there was not enough free VRAM "
-            "(this happens when other models are resident). Free VRAM (unload other "
-            "models) or select a smaller model / the 4-bit memory mode in "
-            "VLM Model Loader (H3)."
-        )
-    return H3PipelineError(str(e))
+    from .vlm import VRAM_HINT
+
+    s = str(e)
+    if "same device" in s or "index_select" in s or VRAM_HINT in s:
+        return H3PipelineError(VRAM_HINT)
+    return H3PipelineError(s)
 
 
 def log(msg: str) -> None:
@@ -200,30 +198,8 @@ def frames_to_tensor(frames: list):
 
 def text_generate(predictor, prompt: str, max_new_tokens: int,
                   temperature: float = TEMPERATURE) -> str:
-    """Text-only chat completion on the predictor's loaded model."""
-    import torch
-    from ComfyUI_VLM_nodes.nodes.runtime import (inference_context, model_device,
-                                                 move_inputs)
-    model = predictor.handle.ensure_loaded()
-    device = model_device(model)
-    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
-    inputs = predictor.processor.apply_chat_template(
-        messages, add_generation_prompt=True, tokenize=True,
-        return_dict=True, return_tensors="pt",
-    )
-    inputs = move_inputs(inputs, device)
-    generation = {"max_new_tokens": int(max_new_tokens), "do_sample": temperature > 0}
-    if temperature > 0:
-        generation.update(temperature=temperature, top_p=TOP_P)
-    with torch.inference_mode(), inference_context(device, predictor.dtype):
-        try:
-            output = model.generate(**inputs, **generation)
-        except RuntimeError as e:
-            raise _device_hint(e)
-    n = inputs["input_ids"].shape[-1]
-    return predictor.processor.batch_decode(
-        output[:, n:], skip_special_tokens=True, clean_up_tokenization_spaces=False,
-    )[0].strip()
+    """Text-only chat completion on the loaded model (see vlm.VLMPredictor)."""
+    return predictor.generate_text(prompt, max_new_tokens, temperature, TOP_P)
 
 
 def extract_json(text: str) -> dict:
@@ -231,17 +207,21 @@ def extract_json(text: str) -> dict:
     m = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL)
     if m:
         text = m.group(1)
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("JSON block not found")
+    text = text[start:]
+    if not text.rstrip().endswith("}"):
+        # truncated generation: keep the open tail, json_repair closes it below
+        pass
     else:
-        start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end <= start:
-            raise ValueError("JSON block not found")
-        text = text[start:end + 1]
+        text = text[:text.rfind("}") + 1]
     # common small-model slip: trailing commas
     text = re.sub(r",\s*([}\]])", r"\1", text)
     try:
         return json.loads(text)
     except json.JSONDecodeError:
-        # last resort for small models: unescaped quotes, missing brackets etc.
+        # last resort for small models: unescaped quotes, truncated output etc.
         import json_repair
         repaired = json_repair.loads(text)
         if isinstance(repaired, dict):
@@ -504,7 +484,8 @@ def build_alignment_line(mode: str, duration: float) -> str | None:
 
 def build_rewrite_prompt(mode: str, duration: float, analysis: dict,
                          guide_text: str, transcript: str | None,
-                         tags: list | None = None) -> str:
+                         tags: list | None = None,
+                         output_style: str = "markers") -> str:
     shots = analysis.get("shots", [])
     single_shot = len(shots) <= 1
     is_ltx = (mode == "LTX")
@@ -528,37 +509,86 @@ def build_rewrite_prompt(mode: str, duration: float, analysis: dict,
             "\"今日は六本木をブラブラしてる\" -> \"きょうはろっぽんぎをぶらぶらしてる\". Other languages stay verbatim."
         )
     elif mode == "T2VA":
-        mode_rule = (
-            "Mode: T2VA (text only). Output the three core fields in this exact order:\n"
-            "1. integrated_multimodal_description: [Shot 1] ...\n"
-            "2. overall_soundscape: ...\n"
-            "3. non_diegetic_music: ...\n"
-            "There is no image-alignment line in T2VA; start directly with integrated_multimodal_description."
-        )
+        if output_style == "canonical":
+            mode_rule = (
+                "Mode: T2VA (text only). Output the three core fields in this exact order:\n"
+                "1. integrated_multimodal_description: [Shot 1] ...\n"
+                "2. overall_soundscape: ...\n"
+                "3. non_diegetic_music: ...\n"
+                "There is no image-alignment line in T2VA; start directly with integrated_multimodal_description."
+            )
+        else:
+            mode_rule = (
+                "Mode: T2VA (text only). Output three sections in this exact order, each starting "
+                "with its marker on its own line, content on the following lines:\n"
+                "[DESCRIPTION]\n<the integrated multimodal description, starting with [Shot 1] ...>\n"
+                "[SOUNDSCAPE]\n<the overall soundscape>\n"
+                "[MUSIC]\n<the non-diegetic music, or N/A>\n"
+                "Do NOT write the long field names (integrated_multimodal_description etc.) — "
+                "use only these markers. There is no image-alignment line in T2VA."
+            )
     elif mode == "I2VA":
-        mode_rule = (
-            "Mode: I2VA. The user will supply <Picture 1> as the actual first frame of the target video.\n"
-            "Output ONLY the three core fields (integrated_multimodal_description / overall_soundscape / non_diegetic_music) in that order, "
-            "separated by one blank line. Do NOT output the image-alignment instruction line — the tool adds it automatically.\n"
-            "Content rule: Shot 1 must start from the state shown in <Picture 1> (establish style, subjects, composition, scene anchors first) and develop forward. "
-            "Keep character identity, clothing, colors, key objects, and spatial relations consistent with the reference."
-        )
+        if output_style == "canonical":
+            mode_rule = (
+                "Mode: I2VA. The user will supply <Picture 1> as the actual first frame of the target video.\n"
+                "Output ONLY the three core fields (integrated_multimodal_description / overall_soundscape / non_diegetic_music) in that order, "
+                "separated by one blank line. Do NOT output the image-alignment instruction line — the tool adds it automatically.\n"
+                "Content rule: Shot 1 must start from the state shown in <Picture 1> (establish style, subjects, composition, scene anchors first) and develop forward. "
+                "Keep character identity, clothing, colors, key objects, and spatial relations consistent with the reference."
+            )
+        else:
+            mode_rule = (
+                "Mode: I2VA. The user will supply <Picture 1> as the actual first frame of the target video.\n"
+                "Output three sections in this exact order, each starting with its marker on its own line, "
+                "content on the following lines: [DESCRIPTION], [SOUNDSCAPE], [MUSIC]. "
+                "Do NOT write the long field names — use only these markers, and do NOT output the "
+                "image-alignment instruction line (the tool adds it automatically).\n"
+                "Content rule: the [DESCRIPTION] section must start from the state shown in <Picture 1> "
+                "(establish style, subjects, composition, scene anchors first) and develop forward. "
+                "Keep character identity, clothing, colors, key objects, and spatial relations consistent with the reference."
+            )
     elif mode == "FL2VA":
-        mode_rule = (
-            "Mode: FL2VA. The user will supply Picture 1 (first frame) and Picture 2 (last frame).\n"
-            "Output ONLY the three core fields in that order. Do NOT output the image-alignment instruction line — the tool adds it automatically.\n"
-            "Content rule: write a single continuous shot describing the motion path from Picture 1 to Picture 2: "
-            "first-frame state -> observable intermediate changes -> progressively narrowing differences -> last-frame state. "
-            "Do not repeat two static image descriptions; supply the connecting motion. The last frame must be reached at the end of the shot."
-        )
+        if output_style == "canonical":
+            mode_rule = (
+                "Mode: FL2VA. The user will supply Picture 1 (first frame) and Picture 2 (last frame).\n"
+                "Output ONLY the three core fields in that order. Do NOT output the image-alignment instruction line — the tool adds it automatically.\n"
+                "Content rule: write a single continuous shot describing the motion path from Picture 1 to Picture 2: "
+                "first-frame state -> observable intermediate changes -> progressively narrowing differences -> last-frame state. "
+                "Do not repeat two static image descriptions; supply the connecting motion. The last frame must be reached at the end of the shot."
+            )
+        else:
+            mode_rule = (
+                "Mode: FL2VA. The user will supply Picture 1 (first frame) and Picture 2 (last frame).\n"
+                "Output three sections in this exact order, each starting with its marker on its own line, "
+                "content on the following lines: [DESCRIPTION], [SOUNDSCAPE], [MUSIC]. "
+                "Do NOT write the long field names — use only these markers, and do NOT output the "
+                "image-alignment instruction line (the tool adds it automatically).\n"
+                "Content rule: the [DESCRIPTION] section is a single continuous shot describing the motion path "
+                "from Picture 1 to Picture 2: first-frame state -> observable intermediate changes -> "
+                "progressively narrowing differences -> last-frame state. "
+                "Do not repeat two static image descriptions; supply the connecting motion. The last frame must be reached at the end of the shot."
+            )
     else:  # L2VA
-        mode_rule = (
-            "Mode: L2VA. The user will supply <Picture 1> as the actual LAST frame of the target video.\n"
-            "Output ONLY the three core fields in that order. Do NOT output the image-alignment instruction line — the tool adds it automatically.\n"
-            "Content rule: write a single shot that infers a plausible preceding state, then lets actions, object states, and composition "
-            "gradually converge and land exactly on <Picture 1> in the final moment: "
-            "plausible preceding state -> explicit action and transition path -> gradual convergence -> last-frame landing."
-        )
+        if output_style == "canonical":
+            mode_rule = (
+                "Mode: L2VA. The user will supply <Picture 1> as the actual LAST frame of the target video.\n"
+                "Output ONLY the three core fields in that order. Do NOT output the image-alignment instruction line — the tool adds it automatically.\n"
+                "Content rule: write a single shot that infers a plausible preceding state, then lets actions, object states, and composition "
+                "gradually converge and land exactly on <Picture 1> in the final moment: "
+                "plausible preceding state -> explicit action and transition path -> gradual convergence -> last-frame landing."
+            )
+        else:
+            mode_rule = (
+                "Mode: L2VA. The user will supply <Picture 1> as the actual LAST frame of the target video.\n"
+                "Output three sections in this exact order, each starting with its marker on its own line, "
+                "content on the following lines: [DESCRIPTION], [SOUNDSCAPE], [MUSIC]. "
+                "Do NOT write the long field names — use only these markers, and do NOT output the "
+                "image-alignment instruction line (the tool adds it automatically).\n"
+                "Content rule: the [DESCRIPTION] section is a single shot that infers a plausible preceding state, "
+                "then lets actions, object states, and composition gradually converge and land exactly on "
+                "<Picture 1> in the final moment: plausible preceding state -> explicit action and transition path "
+                "-> gradual convergence -> last-frame landing."
+            )
 
     extra = ""
     if transcript:
@@ -626,6 +656,29 @@ Read the LTX prompt-writing guide below, then use the video analysis JSON to pro
 8. If there is no dialogue, no singing, and no on-screen speaking source, do not invent any.
 """
 
+    if output_style == "canonical":
+        output_rules = """1. Write ONLY the three core fields, in English, separated by one blank line, in the order required by the mode rule above.
+2. No markdown fences, no commentary, no explanations before or after the fields.
+3. Preserve the exact field names: integrated_multimodal_description, overall_soundscape, non_diegetic_music.
+4. Never output the image-alignment instruction line ("For the target video..." or "How the reference pictures align...") — the tool adds it.
+5. For keyframe modes, reference <Picture 1>/Picture 2 in the shot descriptions.
+6. Dialogue inside <d>[Language] ... </d> must keep the original language verbatim.
+7. If there is no dialogue, no singing, and no on-screen speaking source, do not invent any <d> blocks.
+8. overall_soundscape: 1-4 sentences; non_diegetic_music: 1-3 sentences or "N/A".
+9. For overall_soundscape, infer plausible ambient/physical/non-verbal sounds from the visual content (weather, locations, actions, crowds). Use "N/A" only when the scene truly has no plausible sound source.
+"""
+    else:
+        output_rules = """1. Write ONLY the three marker sections ([DESCRIPTION], [SOUNDSCAPE], [MUSIC]), in English, in that exact order. Each marker stands alone on its own line; its content follows on the next lines.
+2. No markdown fences, no commentary, no explanations before or after the sections.
+3. Never write the long field names (integrated_multimodal_description, overall_soundscape, non_diegetic_music) — the tool converts markers to the final format.
+4. Never output the image-alignment instruction line ("For the target video..." or "How the reference pictures align...") — the tool adds it.
+5. For keyframe modes, reference <Picture 1>/Picture 2 in the [DESCRIPTION] section.
+6. Dialogue inside <d>[Language] ... </d> must keep the original language verbatim.
+7. If there is no dialogue, no singing, and no on-screen speaking source, do not invent any <d> blocks.
+8. [SOUNDSCAPE]: 1-4 sentences; [MUSIC]: 1-3 sentences or "N/A".
+9. For [SOUNDSCAPE], infer plausible ambient/physical/non-verbal sounds from the visual content (weather, locations, actions, crowds). Use "N/A" only when the scene truly has no plausible sound source.
+"""
+
     return f"""You are writing a MiniMax H3 video-generation prompt.
 Read the H3 prompt-writing guide below, then use the video analysis JSON to produce the FINAL prompt.
 
@@ -645,16 +698,7 @@ Read the H3 prompt-writing guide below, then use the video analysis JSON to prod
 {json.dumps(analysis, ensure_ascii=False, indent=2)}
 
 ## Output rules
-1. Write ONLY the three core fields, in English, separated by one blank line, in the order required by the mode rule above.
-2. No markdown fences, no commentary, no explanations before or after the fields.
-3. Preserve the exact field names: integrated_multimodal_description, overall_soundscape, non_diegetic_music.
-4. Never output the image-alignment instruction line ("For the target video..." or "How the reference pictures align...") — the tool adds it.
-5. For keyframe modes, reference <Picture 1>/Picture 2 in the shot descriptions.
-6. Dialogue inside <d>[Language] ... </d> must keep the original language verbatim.
-7. If there is no dialogue, no singing, and no on-screen speaking source, do not invent any <d> blocks.
-8. overall_soundscape: 1-4 sentences; non_diegetic_music: 1-3 sentences or "N/A".
-9. For overall_soundscape, infer plausible ambient/physical/non-verbal sounds from the visual content (weather, locations, actions, crowds). Use "N/A" only when the scene truly has no plausible sound source.
-"""
+{output_rules}"""
 
 
 def format_shot_breaks(text: str) -> str:
@@ -726,11 +770,40 @@ def _fix_field_labels(text: str) -> str:
     return text
 
 
+_MARKERS = (("DESCRIPTION", "integrated_multimodal_description"),
+            ("SOUNDSCAPE", "overall_soundscape"),
+            ("MUSIC", "non_diegetic_music"))
+
+
+def _markers_to_fields(raw: str) -> str | None:
+    """Reassemble canonical H3 fields from [DESCRIPTION]/[SOUNDSCAPE]/[MUSIC] sections."""
+    if not all(f"[{name}]" in raw for name, _ in _MARKERS):
+        return None
+    parts = re.split(r"\[(DESCRIPTION|SOUNDSCAPE|MUSIC)\]", raw)
+    sections = {}
+    for i in range(1, len(parts) - 1, 2):
+        sections[parts[i]] = parts[i + 1].strip()
+    if len(sections) != 3 or not all(sections.get(name) for name, _ in _MARKERS):
+        return None
+    return "\n\n".join(f"{field}: {sections[name]}"
+                       for name, field in _MARKERS)
+
+
 def _validate_rewrite(raw: str, mode: str) -> str:
-    m = re.search(r"```(?:text|prompt)?\s*(.*?)\s*```", raw, re.DOTALL)
+    # only unwrap a code fence when it wraps the whole output; trailing junk
+    # fences after the fields must not swallow the prompt itself
+    s = raw.strip()
+    m = re.match(r"^```[a-zA-Z]*\s*(.*?)\s*```\s*$", s, re.DOTALL)
     if m:
-        raw = m.group(1)
+        raw = m.group(1).strip()
+    else:
+        raw = re.sub(r"^(?:\s*```[a-zA-Z]*\s*)+", "", s)   # stray opening fence
+        raw = re.sub(r"(?:\s*```\s*)+$", "", raw)          # trailing fence runs
     raw = raw.strip()
+    if mode != "LTX":
+        assembled = _markers_to_fields(raw)
+        if assembled is not None:
+            raw = assembled
     if mode == "LTX":
         if len(raw.split()) < 20:
             die(f"LLM output too short for an LTX prompt: {len(raw.split())} words")
@@ -764,8 +837,15 @@ def run_rewrite(predictor, mode: str, duration: float, analysis: dict,
     prompt = build_rewrite_prompt(mode, duration, analysis, guide_text, transcript,
                                   tags=tags)
     last_err = None
-    # small models sometimes ramble or drop a field; one corrective retry
-    for attempt in range(2):
+    # ~2-4% of generations from a 7B model hit a stochastic glitch (early EOS,
+    # injected garbage tokens, label dodging); retry hotter and alternate the
+    # output format (markers / canonical labels) since degeneration is
+    # prompt-dependent
+    for attempt in range(3):
+        output_style = "canonical" if attempt == 2 else "markers"
+        prompt = build_rewrite_prompt(mode, duration, analysis, guide_text,
+                                      transcript, tags=tags,
+                                      output_style=output_style)
         raw = text_generate(predictor, prompt, max_new_tokens,
                             temperature=TEMPERATURE if attempt == 0 else 0.6)
         try:
@@ -776,12 +856,7 @@ def run_rewrite(predictor, mode: str, duration: float, analysis: dict,
                 (out_dir / f"rewrite_failed_{attempt + 1}.txt").write_text(
                     raw + "\n", encoding="utf-8")
             log(f"rewrite validation failed ({e}); retrying with correction")
-            prompt = (
-                f"Your previous output was invalid: {e}\n"
-                "Redo the task below and re-output ONLY the required fields with no commentary, "
-                "no code fences, keeping every required field name exactly.\n\n" + prompt
-            )
-    die(f"LLM rewrite failed validation twice: {last_err}")
+    die(f"LLM rewrite failed validation 3 times: {last_err}")
 
 
 def resolve_duration(mode: str, requested: float | None, effective_len: float) -> float:

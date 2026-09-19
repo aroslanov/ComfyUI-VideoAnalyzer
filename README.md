@@ -12,42 +12,38 @@ by analyzing it with a vision-language model.
 > repository. The H3 prompt spec itself comes from
 > [MiniMax-AI/MiniMax-H3](https://github.com/MiniMax-AI/MiniMax-H3).
 
-![ComfyUI workflow: Load Video -> MiniMax H3 Video to Prompt -> View Text](assets/screenshot.png)
+![ComfyUI workflow: Load Video -> MiniMax H3 Video to Prompt -> Preview as Text](assets/screenshot.png)
 
-**Fully self-contained**: the VLM runs inside ComfyUI via
-[ComfyUI_VLM_nodes](https://github.com/gokayfem/ComfyUI_VLM_nodes) — no
-llama-server / LM Studio / API keys. The model auto-downloads from HuggingFace
-on first execution into `ComfyUI/models/LLavacheckpoints/` and its VRAM
-residency is managed by ComfyUI's model manager (smart loading/offloading).
+**Fully self-contained** (single pack, no external services): the VLM runs
+inside ComfyUI through this pack's own loader (`vlm.py`) — no llama-server /
+LM Studio / API keys / other node packs. The model auto-downloads from
+HuggingFace on first execution into `ComfyUI/models/video_analyzer/` and its
+VRAM residency is managed by ComfyUI's model manager (smart loading/offloading).
 
 ## Nodes
-
-> **Requires the [ComfyUI_VLM_nodes](https://github.com/gokayfem/ComfyUI_VLM_nodes)
-> pack** (see Setup) — both of our nodes call its in-process VLM machinery, and
-> its **View Text (Streaming)** node is used for display in the sample workflow.
 
 | Node | Inputs | Outputs |
 |------|--------|---------|
 | **VLM Model Loader (H3)** | model picker, custom_model_id, memory_mode, attention_mode | `VLM_MODEL` |
 | **MiniMax H3 Video to Prompt** | `video` (VIDEO), `vlm` (VLM_MODEL), `mode`, `duration`, + advanced options | `STRING` ("Minimax H3 Prompt") |
 
-Display the result with the **View Text (Streaming)** node from ComfyUI_VLM_nodes
-(`VLM Nodes/Text` category) — it also shows tokens live while they generate.
-For tight-VRAM workflows the analyzer has an `unload_vlm` option that releases
-the model after each run (it reloads automatically on the next).
+Display the result with ComfyUI's native **Preview as Text** node
+(`PreviewAny`). For tight-VRAM workflows the analyzer has an `unload_vlm`
+option that releases the model after each run (it reloads automatically on
+the next).
 
 Standard nodes are reused wherever possible: video input comes from the core
-**Load Video** node (or any `VIDEO` source, e.g. Wan output), the VLM loader is
-built on ComfyUI_VLM_nodes' `ModernVLMPredictor` (transformers, ComfyUI-managed
-VRAM), and audio/frames are processed with system `ffmpeg`/`ffprobe`.
+**Load Video** node (or any `VIDEO` source, e.g. Wan output), the display is
+the core **Preview as Text** node, and audio/frames are processed with system
+`ffmpeg`/`ffprobe`.
 
 ## Model
 
-Default: `Qwen 2.5 VL 7B Instruct` (BF16, ~16 GB VRAM). Smaller/faster picks from
-the loader's dropdown (e.g. `Qwen 3 VL 4B Instruct`, `Qwen 3 VL 2B Instruct`,
-`SmolVLM2 2.2B Video`) auto-download the same way; a `Custom Hugging Face model`
-field accepts any image/video-to-text repo id. For cards under 16 GB VRAM use
-the 4-bit NF4 memory mode or a smaller catalog model.
+Default: `Qwen 2.5 VL 7B Instruct` (BF16, ~16 GB VRAM). Smaller/faster picks
+from the loader's dropdown (`Qwen 2.5 VL 3B`, `Qwen 3 VL 2B/4B/8B Instruct`)
+auto-download the same way; a `Custom Hugging Face model` field accepts any
+Qwen-family image/video-to-text repo id. For cards under 16 GB VRAM pick a
+smaller catalog model or the `CPU` memory mode.
 
 ## Platform support
 
@@ -55,10 +51,10 @@ the 4-bit NF4 memory mode or a smaller catalog model.
 |----------|-------|
 | Windows  | Primary dev/test platform (RTX 5090, CUDA). `ffmpeg` in PATH required. |
 | Linux    | Same code paths (pure `pathlib`, `subprocess ffmpeg`, CPU faster-whisper). CUDA or CPU. |
-| macOS    | Apple Silicon: ComfyUI_VLM_nodes selects Metal; use `ComfyUI managed (BF16)` memory mode and `Auto (SDPA)` attention (the defaults). ASR (faster-whisper) and PANNs run on CPU. |
+| macOS    | Apple Silicon: ComfyUI's device selection applies (Metal); use `ComfyUI managed (BF16)` memory mode and `Auto (SDPA)` attention (the defaults). ASR (faster-whisper) and PANNs run on CPU. |
 
 All models download automatically on first use — no manual model placement:
-the VLM into `ComfyUI/models/LLavacheckpoints/`, faster-whisper and PANNs
+the VLM into `ComfyUI/models/video_analyzer/`, faster-whisper and PANNs
 weights into their standard cache locations.
 
 ## How it works (two passes, one loaded model)
@@ -87,28 +83,24 @@ dumps) are written to `<ComfyUI temp>/h3_video2prompt/` for inspection.
 ## Setup
 
 ```bat
-:: 1) the VLM node pack (in-process model loading + auto-download)
-git clone https://github.com/gokayfem/ComfyUI_VLM_nodes ComfyUI\custom_nodes\ComfyUI_VLM_nodes
-
-:: 2) dependencies for both packs (portable ComfyUI; does not touch ComfyUI's torch)
-python_embeded\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI_VLM_nodes\requirements.txt
+:: dependencies (portable ComfyUI; does not touch ComfyUI's torch)
+git clone https://github.com/aroslanov/ComfyUI-VideoAnalyzer ComfyUI\custom_nodes\ComfyUI-VideoAnalyzer
 python_embeded\python.exe -m pip install -r ComfyUI\custom_nodes\ComfyUI-VideoAnalyzer\requirements.txt
 ```
 
 Requires `ffmpeg`/`ffprobe` in PATH. First execution of the VLM loader
 downloads the selected model (Qwen2.5-VL-7B ≈ 16 GB) — watch the console.
 
-**Dependency safety:** both requirement sets install additively — they do not
+**Dependency safety:** the requirement set installs additively — it does not
 upgrade or downgrade any ComfyUI core dependency (torch, numpy, transformers,
 safetensors, av, ...). Verified with `pip check` against ComfyUI 0.36's own
 `requirements.txt` plus a clean server boot with zero custom-node import
-failures. Version bounds in both `requirements.txt` files reflect the tested
-versions.
+failures. Version bounds in `requirements.txt` reflect the tested versions.
 
 ## Workflow
 
 Load `workflows/h3_video2prompt_sample.json` in ComfyUI:
-`Load Video -> MiniMax H3 Video to Prompt -> View Text (Streaming)`, with the
+`Load Video -> MiniMax H3 Video to Prompt -> Preview as Text`, with the
 VLM Model Loader feeding the analyzer node.
 
 ## Tests
@@ -142,15 +134,16 @@ in-process Qwen2.5-VL-7B, ComfyUI 0.36):
 - **full-stack `/prompt` API: PASS** — T2VA and LTX, including `unload_vlm=true`
   reload cycles
 - **auto-download verified for all three model types**: VLM (fresh catalog model
-  downloaded into `ComfyUI/models/LLavacheckpoints/`), faster-whisper (tiny +
+  downloaded into `ComfyUI/models/video_analyzer/`), faster-whisper (tiny +
   small re-downloaded after cache deletion), PANNs weights (re-downloaded after
   deletion)
 
 ## License and credits
 
 This pack is licensed under the **MIT License** (see
-[LICENSE](LICENSE)) for its own code: the ComfyUI nodes, the Windows/ComfyUI
-pipeline port, robustness handling, workflows, and tests.
+[LICENSE](LICENSE)) for its own code: the ComfyUI nodes, the in-process VLM
+loader, the Windows/ComfyUI pipeline port, robustness handling, workflows,
+and tests.
 
 - Pipeline and prompt guides: based on
   [knishika62/video-analyzer](https://github.com/knishika62/video-analyzer)
@@ -163,5 +156,7 @@ pipeline port, robustness handling, workflows, and tests.
   [MiniMax-AI/MiniMax-H3](https://github.com/MiniMax-AI/MiniMax-H3) project
   documentation (also without a detected SPDX license; included with
   attribution as technical documentation).
-- In-process VLM loading: [ComfyUI_VLM_nodes](https://github.com/gokayfem/ComfyUI_VLM_nodes)
+- The ComfyUI VRAM-residency pattern for transformers models
+  (`ManagedTorchModel`) follows the approach of
+  [ComfyUI_VLM_nodes](https://github.com/gokayfem/ComfyUI_VLM_nodes)
   by Gökay Aydoğan.

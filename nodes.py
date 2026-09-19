@@ -1,11 +1,9 @@
 # nodes.py - ComfyUI nodes for the video analyzer (MiniMax H3 prompt generation).
 #
-# The VLM runs in-process via ComfyUI_VLM_nodes (https://github.com/gokayfem/ComfyUI_VLM_nodes):
-# models auto-download from HuggingFace into ComfyUI's model directory on first use
-# and are registered with ComfyUI's model manager (smart VRAM residency/offloading).
-# No external services are used.
+# The VLM runs fully in-process via our own loader (vlm.py): models auto-download
+# from HuggingFace into ComfyUI's model directory and VRAM residency is managed
+# by ComfyUI's model manager. No external node packs or services.
 import re
-import sys
 import threading
 from pathlib import Path
 
@@ -14,36 +12,13 @@ from comfy_api.latest import io, ui, InputImpl, Types
 
 from . import pipeline
 from .pipeline import DEFAULT_ASR_MODEL, DEFAULT_TAG_THRESHOLD, DEFAULT_TAG_MAX
-
-# Make the sibling VLM node pack importable
-_VLM_PACK_PARENT = Path(__file__).resolve().parent.parent
-if str(_VLM_PACK_PARENT) not in sys.path:
-    sys.path.insert(0, str(_VLM_PACK_PARENT))
-
-try:
-    from ComfyUI_VLM_nodes.nodes.modern_vlm import (
-        LEGACY_MODEL_LABELS,
-        MODEL_CATALOG,
-        ModernVLMPredictor,
-        RECOMMENDED_MODEL_LABELS,
-    )
-except ImportError as exc:  # pragma: no cover
-    raise ImportError(
-        "ComfyUI-VideoAnalyzer requires the ComfyUI_VLM_nodes pack: "
-        "https://github.com/gokayfem/ComfyUI_VLM_nodes "
-        "(clone it into custom_nodes and install its requirements.txt)"
-    ) from exc
-
-_MODEL_LABELS = tuple(RECOMMENDED_MODEL_LABELS) + tuple(
-    l for l in LEGACY_MODEL_LABELS if "Qwen 2.5 VL" in l
-)
-_DEFAULT_MODEL = "Qwen 2.5 VL 7B Instruct (legacy workflows)"
-_MEMORY_MODES = ("ComfyUI managed (BF16)", "4-bit NF4 (bitsandbytes)",
-                 "8-bit (bitsandbytes)", "CPU")
-_ATTENTION_MODES = ("Auto (SDPA)", "Flash Attention 2", "Eager")
+from .vlm import (ATTENTION_MODES, DEFAULT_MODEL_LABEL, MODEL_CATALOG,
+                  MEMORY_MODES, VLMPredictor)
 
 # module-level cache: ComfyUI locks v3 node classes against attribute mutation
 _VLM_CACHE = {"lock": threading.RLock(), "key": None, "handle": None}
+
+_MODEL_LABELS = tuple(MODEL_CATALOG) + ("Custom Hugging Face model",)
 
 
 class H3VLMModelLoader(io.ComfyNode):
@@ -69,22 +44,22 @@ class H3VLMModelLoader(io.ComfyNode):
             search_aliases=["vlm loader", "vl model loader", "vision model loader",
                             "llm loader", "qwen vl"],
             display_name="VLM Model Loader (H3)",
-            description="Vision-language model for video analysis. Runs in-process via "
-                        "ComfyUI_VLM_nodes; the model auto-downloads from HuggingFace on "
-                        "first execution and its VRAM is managed by ComfyUI.",
+            description="Vision-language model for video analysis. Runs in-process; "
+                        "the model auto-downloads from HuggingFace on first execution "
+                        "and its VRAM is managed by ComfyUI.",
             category="video_analyzer",
             essentials_category="Loaders",
             inputs=[
-                io.Combo.Input("model", options=list(_MODEL_LABELS), default=_DEFAULT_MODEL,
+                io.Combo.Input("model", options=list(_MODEL_LABELS), default=DEFAULT_MODEL_LABEL,
                                tooltip="HuggingFace model, downloaded automatically on first use."),
                 io.String.Input("custom_model_id", default="", optional=True,
-                                tooltip="Only for 'Custom Hugging Face model': repo id like "
-                                        "Qwen/Qwen2.5-VL-7B-Instruct."),
-                io.Combo.Input("memory_mode", options=list(_MEMORY_MODES),
+                                tooltip="Only for 'Custom Hugging Face model': repo id of a "
+                                        "Qwen-family VL model, e.g. Qwen/Qwen2.5-VL-7B-Instruct."),
+                io.Combo.Input("memory_mode", options=list(MEMORY_MODES),
                                default="ComfyUI managed (BF16)", advanced=True,
                                tooltip="ComfyUI managed keeps the model resident with smart "
-                                       "offloading; 4/8-bit reduce VRAM; CPU avoids VRAM entirely."),
-                io.Combo.Input("attention_mode", options=list(_ATTENTION_MODES),
+                                       "offloading; CPU keeps it in system RAM."),
+                io.Combo.Input("attention_mode", options=list(ATTENTION_MODES),
                                default="Auto (SDPA)", advanced=True),
             ],
             outputs=[io.Custom("VLM_MODEL").Output(display_name="vlm")],
@@ -95,12 +70,12 @@ class H3VLMModelLoader(io.ComfyNode):
         effective_custom_id = custom_model_id.strip() if model == "Custom Hugging Face model" else ""
         if model == "Custom Hugging Face model" and not effective_custom_id:
             raise ValueError("custom_model_id is required for 'Custom Hugging Face model'")
-        if model not in MODEL_CATALOG:
+        if model != "Custom Hugging Face model" and model not in MODEL_CATALOG:
             raise ValueError(f"Unsupported model {model!r}")
         key = (model, effective_custom_id, memory_mode, attention_mode)
         predictor = cls._get_or_create(
             key,
-            lambda: ModernVLMPredictor(model, effective_custom_id, memory_mode, attention_mode),
+            lambda: VLMPredictor(model, effective_custom_id, memory_mode, attention_mode),
         )
         return io.NodeOutput({"kind": "local", "predictor": predictor})
 

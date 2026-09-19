@@ -145,7 +145,7 @@ def main() -> None:
 
     videos = build_synthetic_videos()
     print(f"synthetic videos: {sorted(videos)}", flush=True)
-    vlm = build_vlm("Qwen 2.5 VL 7B Instruct (legacy workflows)")
+    vlm = build_vlm("Qwen 2.5 VL 7B Instruct")
 
     cases = CASES[:12] if args.quick else CASES
     failures = 0

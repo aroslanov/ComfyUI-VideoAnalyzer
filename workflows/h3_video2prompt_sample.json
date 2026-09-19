@@ -49,7 +49,7 @@
         "Node name for S&R": "H3VLMModelLoader"
       },
       "widgets_values": [
-        "Qwen 2.5 VL 7B Instruct (legacy workflows)",
+        "Qwen 2.5 VL 7B Instruct",
         "ComfyUI managed (BF16)",
         "Auto (SDPA)",
         ""
@@ -105,7 +105,7 @@
     },
     {
       "id": 4,
-      "type": "ViewText",
+      "type": "PreviewAny",
       "pos": [1000, 240],
       "size": [460, 380],
       "flags": {},
@@ -113,46 +113,23 @@
       "mode": 0,
       "inputs": [
         {
-          "name": "text",
-          "type": "STRING",
-          "link": 3,
-          "widget": {
-            "name": "text"
-          }
+          "name": "source",
+          "type": "*",
+          "link": 3
         }
       ],
       "outputs": [
         {
-          "name": "text",
+          "name": "STRING",
           "type": "STRING",
           "links": null,
           "slot_index": 0
-        },
-        {
-          "name": "characters",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "words",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "lines",
-          "type": "INT",
-          "links": null
-        },
-        {
-          "name": "stats_json",
-          "type": "STRING",
-          "links": null
         }
       ],
       "properties": {
-        "Node name for S&R": "ViewText"
+        "Node name for S&R": "PreviewAny"
       },
-      "widgets_values": [""]
+      "widgets_values": []
     }
   ],
   "links": [

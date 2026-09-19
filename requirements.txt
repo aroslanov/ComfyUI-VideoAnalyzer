@@ -5,6 +5,5 @@
 faster-whisper>=1.1,<2        # 1.2.1 tested; pulls ctranslate2/onnxruntime (additive)
 panns-inference>=0.1.1,<0.2   # 0.1.1 tested; pulls librosa/numba/matplotlib (additive, numpy-2 compatible)
 json-repair>=0.30,<1          # 0.63.4 tested; no dependencies
-# The vision-language model stack comes from the sibling pack, which has its own
-# bounded requirements: see ComfyUI_VLM_nodes/requirements.txt (transformers>=5.4,
-# accelerate, qwen-vl-utils, ...). Install it first — see README.
+# The vision-language model runs through this pack's own loader (vlm.py) using
+# ComfyUI's preinstalled transformers/torch — no extra dependencies.

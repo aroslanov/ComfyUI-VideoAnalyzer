@@ -21,12 +21,12 @@ DEFAULT_VIDEOS = Path(os.environ.get(
     r"C:\Users\Public\Documents\Adobe\Premiere Pro\26.0\Sample Media"))
 OUT_DIR = ROOT / "out"
 H3_FIELDS = ("integrated_multimodal_description", "overall_soundscape", "non_diegetic_music")
-DEFAULT_MODEL_LABEL = "Qwen 2.5 VL 7B Instruct (legacy workflows)"
+DEFAULT_MODEL_LABEL = "Qwen 2.5 VL 7B Instruct"
 
 
 def build_vlm(label: str) -> dict:
-    from ComfyUI_VLM_nodes.nodes.modern_vlm import ModernVLMPredictor
-    predictor = ModernVLMPredictor(label, "", "ComfyUI managed (BF16)", "Auto (SDPA)")
+    from vlm import VLMPredictor
+    predictor = VLMPredictor(label, "", "ComfyUI managed (BF16)", "Auto (SDPA)")
     return {"kind": "local", "predictor": predictor}
 
 
