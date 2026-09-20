@@ -8,6 +8,7 @@
 #   - LLM: OpenAI-compatible HTTP endpoint -> in-process VLM from ComfyUI_VLM_nodes
 #     (frames go through the model's native video pathway, one call per pass)
 
+import base64
 import json
 import os
 import re
@@ -17,6 +18,13 @@ import subprocess
 import tempfile
 import time
 from typing import NoReturn
+
+import requests
+
+try:
+    from .vlm import tensor_batch_to_pil, VRAM_HINT
+except ImportError:  # direct (script) import of this module
+    from vlm import tensor_batch_to_pil, VRAM_HINT
 from pathlib import Path
 
 KEYFRAME_MODES = ("I2VA", "FL2VA", "L2VA")
@@ -33,16 +41,120 @@ TEMPERATURE = 0.2
 TOP_P = 0.9
 
 
+class APIVLMClient:
+    """OpenAI-compatible /v1/chat/completions backend (LM Studio, vLLM,
+    llama.cpp server, hosted APIs). Exposes the same generate/generate_text
+    interface as vlm.VLMPredictor so the pipeline is backend-agnostic.
+    Frames are sent as base64 image_url blocks with per-frame timestamps —
+    the most widely supported multi-image form (issue #2)."""
+
+    def __init__(self, api_base: str, model: str, api_key: str = "",
+                 temperature: float = 0.2, timeout: tuple = (15, 1800)):
+        self.url = api_base.rstrip("/") + "/chat/completions"
+        self.model = model
+        self.api_key = api_key
+        self.temperature = temperature
+        self.timeout = timeout
+
+    def _headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
+
+    def _chat(self, messages: list, max_tokens: int, temperature: float) -> str:
+        payload = {"model": self.model, "messages": messages,
+                   "temperature": temperature, "max_tokens": int(max_tokens)}
+        last_err = None
+        attempt_budget = int(max_tokens)
+        for attempt in range(1, 4):
+            try:
+                log(f"API call... (attempt {attempt}/3, max_tokens={attempt_budget})")
+                t0 = time.time()
+                payload["max_tokens"] = attempt_budget
+                resp = requests.post(self.url, json=payload, headers=self._headers(),
+                                     timeout=self.timeout)
+                if 400 <= resp.status_code < 500 and resp.status_code != 429:
+                    die(f"API endpoint returned HTTP {resp.status_code} (no retry):\n{resp.text[:500]}")
+                resp.raise_for_status()
+                choice = resp.json()["choices"][0]
+                msg = choice["message"]
+                # reasoning models (GLM/DeepSeek) keep their thinking in
+                # reasoning_content or behind <think> blocks; the final answer
+                # arrives in content
+                content = msg.get("content") or ""
+                content = re.sub(r"<think>.*?</think>", "", content, flags=re.DOTALL)
+                content = content.strip()
+                if choice.get("finish_reason") == "length" and attempt < 3:
+                    # reasoning models can exhaust the budget before the answer
+                    # even starts (content still empty); retry with a doubled
+                    # budget instead of returning half-finished reasoning
+                    attempt_budget = min(attempt_budget * 2, 65536)
+                    log(f"API output hit the token cap; retrying with max_tokens={attempt_budget}")
+                    continue
+                if not content:
+                    raise ValueError("empty response content")
+                if len(content) > 200 and len(set(content[:400])) <= 3:
+                    raise ValueError("degenerate output (single repeated char)")
+                log(f"API response: {time.time() - t0:.1f} s, {len(content)} chars")
+                return content
+            except (requests.RequestException, KeyError, json.JSONDecodeError, ValueError) as e:
+                last_err = e
+                log(f"API response error: {e}")
+                if attempt < 3:
+                    time.sleep(3)
+        die(f"API call failed 3 times: {last_err}")
+
+    @staticmethod
+    def _b64_image_url(img) -> str:
+        import io as _io
+        buf = _io.BytesIO()
+        img.save(buf, format="JPEG", quality=90)
+        b64 = base64.b64encode(buf.getvalue()).decode()
+        return f"data:image/jpeg;base64,{b64}"
+
+    def generate(self, images=None, prompt: str = "", system_prompt: str = "",
+                 max_new_tokens: int = 4096, temperature: float = 0.2,
+                 top_p: float = 0.9, video_frames=None, fps: float = 1.0) -> str:
+        frames = tensor_batch_to_pil(video_frames if video_frames is not None else images)
+        if not frames:
+            raise ValueError("Connect either image or video_frames.")
+        messages = []
+        if system_prompt.strip():
+            messages.append({"role": "system",
+                             "content": [{"type": "text", "text": system_prompt.strip()}]})
+        content = [{"type": "text", "text": prompt}]
+        for i, img in enumerate(frames):
+            t = i / float(fps) if video_frames is not None else float(i)
+            content.append({"type": "text", "text": f"Frame at {t:.2f}s"})
+            content.append({"type": "image_url",
+                            "image_url": {"url": self._b64_image_url(img)}})
+        messages.append({"role": "user", "content": content})
+        return self._chat(messages, max_new_tokens,
+                          self.temperature if temperature == TEMPERATURE else temperature)
+
+    def generate_text(self, prompt: str, max_new_tokens: int,
+                      temperature: float = 0.2, top_p: float = 0.9) -> str:
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+        return self._chat(messages, max_new_tokens, temperature).strip()
+
+
+def make_backend(vlm: dict):
+    """vlm dict -> object with generate/generate_text (predictor or API client)."""
+    if vlm.get("kind") == "local":
+        return vlm["predictor"]
+    if vlm.get("kind") == "api":
+        return APIVLMClient(vlm["api_base"], vlm["model"],
+                            api_key=vlm.get("api_key", ""),
+                            temperature=vlm.get("temperature", 0.2))
+    raise ValueError("vlm input must come from VLM Model Loader (H3) or VLM API Loader (H3)")
+
+
 class H3PipelineError(RuntimeError):
     pass
 
 
 def _device_hint(e: RuntimeError) -> H3PipelineError:
-    try:
-        from .vlm import VRAM_HINT
-    except ImportError:  # direct (script) import of this module
-        from vlm import VRAM_HINT
-
     s = str(e)
     if "same device" in s or "index_select" in s or VRAM_HINT in s:
         return H3PipelineError(VRAM_HINT)
@@ -1031,7 +1143,7 @@ def video_to_prompt(video_path: str, out_dir: Path, vlm: dict,
     under out_dir for debugging."""
     require_tool("ffmpeg")
     require_tool("ffprobe")
-    predictor = vlm["predictor"]
+    backend = make_backend(vlm)
     video = Path(video_path)
     if not video.is_file():
         die(f"video not found: {video}")
@@ -1113,13 +1225,13 @@ def video_to_prompt(video_path: str, out_dir: Path, vlm: dict,
                             fps=frame_fps, max_side=frame_max_side,
                             max_frames=max_frames)
     log(f"frames extracted: {len(frames)} ({frames_dir})")
-    analysis = run_analysis(predictor, frames, transcript, tag_lines,
+    analysis = run_analysis(backend, frames, transcript, tag_lines,
                             frame_fps, max_new_tokens)
 
     (out_dir / "analysis.json").write_text(
         json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    prompt_text = run_rewrite(predictor, mode, duration, analysis, guide_text,
+    prompt_text = run_rewrite(backend, mode, duration, analysis, guide_text,
                               transcript, tags=tag_lines, max_new_tokens=max_new_tokens,
                               out_dir=out_dir)
     alignment = build_alignment_line(mode, duration)

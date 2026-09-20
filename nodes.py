@@ -86,6 +86,48 @@ class H3VLMModelLoader(io.ComfyNode):
                f"{id(_VLM_CACHE['handle'])}"
 
 
+class H3APIModelLoader(io.ComfyNode):
+    """Alternative loader: an OpenAI-compatible vision-LLM endpoint instead of
+    the in-process model (LM Studio, vLLM, llama.cpp server, hosted APIs)."""
+
+    @classmethod
+    def define_schema(cls):
+        return io.Schema(
+            node_id="H3APIModelLoader",
+            search_aliases=["api loader", "openai compatible", "lm studio", "vllm",
+                            "llama.cpp server", "remote vlm"],
+            display_name="VLM API Loader (H3)",
+            description="Optional alternative to the in-process loader: call an "
+                        "OpenAI-compatible /v1/chat/completions vision-LLM endpoint "
+                        "(LM Studio, vLLM, llama.cpp server, hosted APIs). Useful when a "
+                        "larger hosted model gives better analysis quality than what fits "
+                        "in-process (issue #2).",
+            category="video_analyzer",
+            essentials_category="Loaders",
+            inputs=[
+                io.String.Input("api_base", default="http://127.0.0.1:8080/v1",
+                                tooltip="OpenAI-compatible API base URL."),
+                io.String.Input("model", default="qwen2.5-vl-7b-instruct",
+                                tooltip="Model name sent to the endpoint."),
+                io.String.Input("api_key", default="", optional=True, advanced=True,
+                                tooltip="Bearer token, only for endpoints that require one."),
+                io.Float.Input("temperature", default=0.2, min=0.0, max=2.0, step=0.01,
+                               advanced=True),
+            ],
+            outputs=[io.Custom("VLM_MODEL").Output(display_name="vlm")],
+        )
+
+    @classmethod
+    def execute(cls, api_base, model, api_key, temperature) -> io.NodeOutput:
+        if not api_base.strip():
+            raise ValueError("api_base is required")
+        if not model.strip():
+            raise ValueError("model is required")
+        return io.NodeOutput({"kind": "api", "api_base": api_base.strip(),
+                              "model": model.strip(), "api_key": api_key,
+                              "temperature": temperature})
+
+
 class MiniMaxH3VideoToPrompt(io.ComfyNode):
     @classmethod
     def define_schema(cls):
@@ -149,8 +191,8 @@ class MiniMaxH3VideoToPrompt(io.ComfyNode):
                 frame_max_side: int, use_asr: bool, asr_model: str, use_audio_tags: bool,
                 tags_threshold: float, tags_max: int, max_new_tokens: int,
                 unload_vlm: bool) -> io.NodeOutput:
-        if not isinstance(vlm, dict) or vlm.get("kind") != "local":
-            raise ValueError("vlm input must come from VLM Model Loader (H3)")
+        if not isinstance(vlm, dict) or vlm.get("kind") not in ("local", "api"):
+            raise ValueError("vlm input must come from VLM Model Loader (H3) or VLM API Loader (H3)")
         work_dir = Path(folder_paths.get_temp_directory()) / "h3_video2prompt" / cls.__name__
         work_dir.mkdir(parents=True, exist_ok=True)
         # ponytail: fixed source.mp4 name; concurrent queues of this node would overwrite
