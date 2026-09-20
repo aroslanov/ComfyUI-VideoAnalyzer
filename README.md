@@ -25,7 +25,15 @@ VRAM residency is managed by ComfyUI's model manager (smart loading/offloading).
 | Node | Inputs | Outputs |
 |------|--------|---------|
 | **VLM Model Loader (H3)** | model picker, custom_model_id, memory_mode, attention_mode | `VLM_MODEL` |
+| **VLM API Loader (H3)** *(optional)* | api_base, model, api_key, temperature | `VLM_MODEL` |
 | **MiniMax H3 Video to Prompt** | `video` (VIDEO), `vlm` (VLM_MODEL), `mode`, `duration`, + advanced options | `STRING` ("Minimax H3 Prompt") |
+
+**VLM API Loader** is the optional second backend: point it at any
+OpenAI-compatible `/v1/chat/completions` vision endpoint (LM Studio, vLLM,
+llama.cpp server, hosted APIs) when a larger hosted model gives better
+analysis quality than what fits in-process. Reasoning models (GLM, DeepSeek)
+are supported — the token budget escalates automatically if the model's
+thinking exhausts it. Both loaders feed the same analyzer node.
 
 Display the result with ComfyUI's native **Preview as Text** node
 (`PreviewAny`). For tight-VRAM workflows the analyzer has an `unload_vlm`
