@@ -1,0 +1,18 @@
+[project]
+name = "comfyui-video-analyzer"
+description = "Video -> MiniMax H3 / LTX-2.5 prompt generation nodes: analyzes a video with an in-process vision-language model (auto-download, ComfyUI-managed VRAM) and writes spec-compliant H3 (T2VA/I2VA/FL2VA/L2VA) or LTX-2.5 prompts, including dialogue from ASR transcription."
+version = "1.0.0"
+license = { file = "LICENSE" }
+dependencies = [
+    "faster-whisper>=1.1,<2",
+    "panns-inference>=0.1.1,<0.2",
+    "json-repair>=0.30,<1",
+]
+
+[project.urls]
+Repository = "https://github.com/aroslanov/ComfyUI-VideoAnalyzer"
+
+[tool.comfy]
+PublisherId = "aroslanov"
+DisplayName = "ComfyUI Video Analyzer"
+Icon = ""
