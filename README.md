@@ -1,7 +1,7 @@
 # ComfyUI-VideoAnalyzer
 
 ComfyUI nodes that turn a video into a **MiniMax H3** video-generation prompt
-(`T2VA` / `I2VA` / `FL2VA` / `L2VA`) or an **LTX-2.5** natural-language prompt,
+(`T2VA` / `I2VA` / `FL2VA` / `L2VA` / `Ref2VA`) or an **LTX-2.5** natural-language prompt,
 by analyzing it with a vision-language model.
 
 > **Key code source:** this pack is a port of
