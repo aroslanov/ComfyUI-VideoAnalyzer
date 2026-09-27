@@ -116,7 +116,7 @@ VLM Model Loader feeding the analyzer node.
 ```bat
 :: direct pipeline test over all sample videos (loads the VLM in-process)
 python_embeded\python.exe ComfyUI\custom_nodes\ComfyUI-VideoAnalyzer\test\test_e2e.py
-::    options: --videos 8,9  --mode FL2VA|I2VA|L2VA|LTX|T2VA  --model <catalog label>
+::    options: --videos 8,9  --mode FL2VA|I2VA|L2VA|Ref2VA|LTX|T2VA  --model <catalog label>
 
 :: comprehensive pre-release matrix (25 cases: modes, durations, sampling,
 :: audio options, fade handling, synthetic no-audio/vertical/1s videos, negative cases)
