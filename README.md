@@ -82,11 +82,18 @@ weights into their standard cache locations.
    (`integrated_multimodal_description` / `overall_soundscape` /
    `non_diegetic_music`), with output validation, field-label repair and a
    corrective retry. Keyframe modes get the fixed image-alignment line added by
-   code. LTX mode uses the LTX guide and outputs one natural-language prompt.
+   code. **Ref2VA mode** uses the full-reference guide
+   (`md/minimax-h3-prompt-guide-ref2va.md`) and writes the 6-section format
+   (`subject_definitions` / `summary` / `retention_analysis` /
+   `detailed_description` / `overall_soundscape` / `non_diegetic_music`) with
+   `<Subject N>`/`<Picture N>`/`<Video N>`/`<Audio N>` reference labels;
+   per-shot reference frames are saved to `keyframes/shot_N.jpg` for you to
+   attach to the H3 API together with the reference video/audio. LTX mode uses
+   the LTX guide and outputs one natural-language prompt.
 
 Intermediate artifacts (`analysis.json`, `prompt.txt`, `frames/`,
-`keyframes/first.jpg|last.jpg`, `transcript.txt`, `audio_tags.txt`, failure
-dumps) are written to `<ComfyUI temp>/h3_video2prompt/` for inspection.
+`keyframes/first.jpg|last.jpg|shot_N.jpg`, `transcript.txt`, `audio_tags.txt`,
+failure dumps) are written to `<ComfyUI temp>/h3_video2prompt/` for inspection.
 
 ## Setup
 

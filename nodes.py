@@ -138,7 +138,7 @@ class MiniMaxH3VideoToPrompt(io.ComfyNode):
             display_name="MiniMax H3 Video to Prompt",
             description="Analyzes a video with the connected vision-language model "
                         "(two passes: visual analysis, then prompt rewrite) and outputs a "
-                        "MiniMax H3 prompt (T2VA / I2VA / FL2VA / L2VA) or an LTX-2.5 "
+                        "MiniMax H3 prompt (T2VA / I2VA / FL2VA / L2VA / Ref2VA) or an LTX-2.5 "
                         "natural-language prompt. Based on knishika62/video-analyzer.",
             category="video_analyzer",
             essentials_category="Video Tools",
