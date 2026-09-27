@@ -146,9 +146,11 @@ class MiniMaxH3VideoToPrompt(io.ComfyNode):
             inputs=[
                 io.Video.Input("video", tooltip="Video to analyze (e.g. from Load Video)."),
                 io.Custom("VLM_MODEL").Input("vlm", tooltip="Vision-language model from VLM Model Loader (H3)."),
-                io.Combo.Input("mode", options=["T2VA", "I2VA", "FL2VA", "L2VA", "LTX"], default="T2VA",
+                io.Combo.Input("mode", options=["T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA", "LTX"], default="T2VA",
                                tooltip="H3: T2VA=text only, I2VA=first frame, FL2VA=first+last frame, "
-                                       "L2VA=last frame. LTX=LTX-2.5 natural-language prompt."),
+                                       "L2VA=last frame, Ref2VA=full-reference (6-section prompt, "
+                                       "per-shot reference frames saved to keyframes/). "
+                                       "LTX=LTX-2.5 natural-language prompt."),
                 io.Float.Input("duration", default=0.0, min=0.0, max=20.0, step=1.0, optional=True,
                                tooltip="Target video duration in seconds. 0 = clamp automatically "
                                        "(H3: 4-15s, LTX: snaps to 6-20s)."),

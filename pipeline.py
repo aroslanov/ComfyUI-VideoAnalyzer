@@ -27,7 +27,7 @@ except ImportError:  # direct (script) import of this module
     from vlm import tensor_batch_to_pil, VRAM_HINT
 from pathlib import Path
 
-KEYFRAME_MODES = ("I2VA", "FL2VA", "L2VA")
+KEYFRAME_MODES = ("I2VA", "FL2VA", "L2VA", "Ref2VA")
 H3_MIN_DURATION, H3_MAX_DURATION = 4, 15
 LTX_MIN_DURATION, LTX_MAX_DURATION = 6, 20
 LTX_VALID_DURATIONS = (6, 8, 10, 12, 14, 16, 18, 20)
@@ -684,7 +684,27 @@ def build_rewrite_prompt(mode: str, duration: float, analysis: dict,
                 "progressively narrowing differences -> last-frame state. "
                 "Do not repeat two static image descriptions; supply the connecting motion. The last frame must be reached at the end of the shot."
             )
-    else:  # L2VA
+    elif mode == "Ref2VA":
+        if output_style == "canonical":
+            mode_rule = (
+                "Mode: Ref2VA (full-reference). Output the six sections in this exact order, "
+                "each starting with its exact section name followed by a colon:\n"
+                "subject_definitions: <Subject N>/<Picture N>/<Video N>/<Audio N> definitions, one line each\n"
+                "summary: short paragraph starting with a bracketed task-type prefix (e.g. [reference generation])\n"
+                "retention_analysis: one line per reference label with the fixed markers\n"
+                "detailed_description: style in 1-2 sentences before [Shot 1], then shots, 350-500 words\n"
+                "overall_soundscape: ...\n"
+                "non_diegetic_music: ...\n"
+            )
+        else:
+            mode_rule = (
+                "Mode: Ref2VA (full-reference). Output six sections in this exact order, each "
+                "starting with its marker alone on its own line, content on the following lines:\n"
+                "[SUBJECT_DEFINITIONS]\n<Subject N>/<Picture N>/<Video N>/<Audio N> definitions, one line each, per the guide\n"
+                "[SUMMARY]\n[RETENTION]\n[DESCRIPTION]\n[SOUNDSCAPE]\n[MUSIC]\n"
+                "Do NOT write the section names (subject_definitions etc.) - use only these markers."
+            )
+    elif mode == "L2VA":
         if output_style == "canonical":
             mode_rule = (
                 "Mode: L2VA. The user will supply <Picture 1> as the actual LAST frame of the target video.\n"
@@ -777,7 +797,18 @@ Read the LTX prompt-writing guide below, then use the video analysis JSON to pro
    analysis has zero dialogue entries, no singing, and no transcript was provided.
 """
 
-    if output_style == "canonical":
+    if mode == "Ref2VA":
+        output_rules = """1. Write ONLY the six marker sections ([SUBJECT_DEFINITIONS], [SUMMARY], [RETENTION], [DESCRIPTION], [SOUNDSCAPE], [MUSIC]), in English, in that exact order. Each marker stands alone on its own line; its content follows on the next lines.
+2. No markdown fences, no commentary.
+3. Never write the section names (subject_definitions etc.) — the tool converts markers to the final format.
+4. [SUMMARY] starts with a bracketed task-type prefix (e.g. "[reference generation]", "[reference generation + audio reference]").
+5. [RETENTION] uses one line per reference label with the fixed markers (fully_preserved / partially_preserved / attribute_transfer / weak_reference; audio: fully_copy / partially_copy / reference / weak_reference).
+6. The [DESCRIPTION] section: visual style established in 1-2 sentences BEFORE [Shot 1]; [Shot 1] opens the first shot without a timestamp, later shots start "[Shot N] At MM:SS.mmm, ..."; 350-500 words; insert <Subject N>/<Picture N>/<Video N>/<Audio N> labels at first appearance and wherever references apply; speaking subjects written as <Subject N> (Sx).
+7. Dialogue inside <d>[Language] ... </d> with ANGLE brackets (never [d]); the [Language] tag is always the English name (e.g. "[Japanese]"); original language verbatim; every analysis/transcript dialogue line is rendered as a <d> block at its timestamp.
+8. [SOUNDSCAPE] and [MUSIC] follow the base-guide definitions; reference-audio copy/reference relations are stated only in the matching section.
+9. Reference labels stay consistent across all sections; total playback time matches the requested duration.
+"""
+    elif output_style == "canonical":
         output_rules = """1. Write ONLY the three core fields, in English, separated by one blank line, in the order required by the mode rule above.
 2. No markdown fences, no commentary, no explanations before or after the fields.
 3. Preserve the exact field names: integrated_multimodal_description, overall_soundscape, non_diegetic_music.
@@ -866,7 +897,7 @@ def strip_stray_tags(text: str) -> str:
         tag = m.group(0)
         if tag.startswith("</"):
             return tag if tag == "</d>" else ""
-        return tag if re.fullmatch(r"<(d|Picture \d+)>", tag) else ""
+        return tag if re.fullmatch(r"<(d|Picture \d+|Subject \d+|Video \d+|Audio \d+)>", tag) else ""
     return re.sub(r"</?[a-zA-Z][a-zA-Z0-9 _-]*>", _keep, text)
 
 
@@ -907,7 +938,7 @@ def _fix_field_labels(text: str) -> str:
     return text
 
 
-_JUNK_LINE = re.compile(r"^\s*(```|addCriterion|import\s|def\s|#|\{|//|<\w)")
+_JUNK_LINE = re.compile(r"^\s*(```|addCriterion|import\s|def\s|#|\{|//)")
 
 
 def _trim_field_content(content: str, blank_line_cuts: bool,
@@ -937,30 +968,43 @@ def _trim_field_content(content: str, blank_line_cuts: bool,
 _MARKERS = (("DESCRIPTION", "integrated_multimodal_description"),
             ("SOUNDSCAPE", "overall_soundscape"),
             ("MUSIC", "non_diegetic_music"))
+_REF2VA_MARKERS = (("SUBJECT_DEFINITIONS", "subject_definitions"),
+                   ("SUMMARY", "summary"),
+                   ("RETENTION", "retention_analysis"),
+                   ("DESCRIPTION", "detailed_description"),
+                   ("SOUNDSCAPE", "overall_soundscape"),
+                   ("MUSIC", "non_diegetic_music"))
 
 
-def _markers_to_fields(raw: str) -> str | None:
-    """Reassemble canonical H3 fields from [DESCRIPTION]/[SOUNDSCAPE]/[MUSIC] sections."""
-    if not all(f"[{name}]" in raw for name, _ in _MARKERS):
+def _markers_to_fields(raw: str, pairs, keep_blank_fields: set) -> str | None:
+    """Reassemble canonical sections from [MARKER] sections."""
+    if not all(f"[{name}]" in raw for name, _ in pairs):
         return None
-    parts = re.split(r"\[(DESCRIPTION|SOUNDSCAPE|MUSIC)\]", raw)
+    names = "|".join(re.escape(name) for name, _ in pairs)
+    parts = re.split(rf"\[({names})\]", raw)
     sections = {}
     for i in range(1, len(parts) - 1, 2):
         sections[parts[i]] = parts[i + 1].strip()
-    if len(sections) != 3 or not all(sections.get(name) for name, _ in _MARKERS):
+    if len(sections) != len(pairs) or not all(sections.get(name) for name, _ in pairs):
         return None
     blocks: list = []
+
+    def _section_text(name):
+        t = sections[name].strip()
+        f = re.match(r"^```[a-zA-Z]*\s*(.*?)\s*```\s*$", t, re.DOTALL)
+        return f.group(1).strip() if f else t
+
     out = "\n\n".join(
-        f"{field}: {_trim_field_content(sections[name], blank_line_cuts=name != 'DESCRIPTION', dialogue_blocks=blocks)}"
-        for name, field in _MARKERS)
+        f"{field}: {_trim_field_content(_section_text(name), blank_line_cuts=field not in keep_blank_fields, dialogue_blocks=blocks)}"
+        for name, field in pairs)
     # relocate dialogue blocks the model misplaced outside the fields
     missing = [b for b in blocks if b not in out]
     if missing:
-        idx = out.find("\n\noverall_soundscape:")
+        nxt = [out.find(f"\n\n{f}:") for _, f in pairs[1:] if out.find(f"\n\n{f}:") >= 0]
         insertion = "\n" + "\n".join(missing)
-        out = out[:idx] + insertion + out[idx:] if idx >= 0 else out + insertion
+        idx = min(nxt) if nxt else len(out)
+        out = out[:idx] + insertion + out[idx:]
     return out
-
 
 def _normalize_dialogue_tags(text: str) -> str:
     """The marker-style prompt makes models mimic square brackets; dialogue
@@ -979,12 +1023,9 @@ def _normalize_shot_labels(text: str) -> str:
     return re.sub(r"(?<!\[)\bShot (\d+\]?)", fix, text)
 
 
-def _trim_canonical_fields(raw: str) -> str:
-    """Same garbage cut for canonical-label outputs (attempt-3 style), with
-    fields reassembled in canonical order (models occasionally emit them
-    out of order)."""
-    fields = ("integrated_multimodal_description", "overall_soundscape",
-              "non_diegetic_music")
+def _trim_canonical_fields(raw: str, fields, keep_blank_fields: set) -> str:
+    """Same garbage cut for canonical-label outputs, with fields reassembled
+    in canonical order (models occasionally emit them out of order)."""
     found = []
     for field in fields:
         pos = raw.find(field + ":")
@@ -997,14 +1038,17 @@ def _trim_canonical_fields(raw: str) -> str:
     for i, (pos, field) in enumerate(found):
         start = pos + len(field) + 1
         end = found[i + 1][0] if i + 1 < len(found) else len(raw)
-        blank_cuts = field != "integrated_multimodal_description"
-        contents[field] = _trim_field_content(raw[start:end], blank_cuts,
+        t = raw[start:end].strip()
+        f = re.match(r"^```[a-zA-Z]*\s*(.*?)\s*```\s*$", t, re.DOTALL)
+        if f:
+            t = f.group(1).strip()
+        contents[field] = _trim_field_content(t,
+                                              blank_line_cuts=field not in keep_blank_fields,
                                               dialogue_blocks=blocks)
-    missing = [b for b in blocks if b not in contents["integrated_multimodal_description"]]
+    missing = [b for b in blocks if b not in contents[fields[0]]]
     if missing:
-        contents["integrated_multimodal_description"] += "\n" + "\n".join(missing)
+        contents[fields[0]] += "\n" + "\n".join(missing)
     return "\n\n".join(f"{field}: {contents[field]}" for field in fields)
-
 
 def _validate_rewrite(raw: str, mode: str, expect_dialogue: bool = False) -> tuple:
     """Returns (cleaned_text, dialogue_ok). Structural problems raise."""
@@ -1018,10 +1062,16 @@ def _validate_rewrite(raw: str, mode: str, expect_dialogue: bool = False) -> tup
         raw = re.sub(r"^(?:\s*```[a-zA-Z]*\s*)+", "", s)   # stray opening fence
         raw = re.sub(r"(?:\s*```\s*)+$", "", raw)          # trailing fence runs
     raw = raw.strip()
-    if mode != "LTX":
-        assembled = _markers_to_fields(raw)
-        if assembled is not None:
-            raw = _normalize_dialogue_tags(assembled)
+    if mode == "Ref2VA":
+        pairs = _REF2VA_MARKERS
+        keep_blank = {"subject_definitions", "retention_analysis", "detailed_description"}
+    else:
+        pairs = _MARKERS
+        keep_blank = {"integrated_multimodal_description"}
+    fields = [f for _, f in pairs]
+    assembled = _markers_to_fields(raw, pairs, keep_blank)
+    if assembled is not None:
+        raw = _normalize_dialogue_tags(assembled)
     if mode == "LTX":
         raw = _normalize_dialogue_tags(raw)
         raw = _trim_field_content(raw, blank_line_cuts=False)
@@ -1040,11 +1090,11 @@ def _validate_rewrite(raw: str, mode: str, expect_dialogue: bool = False) -> tup
         return raw, True
     raw = strip_alignment_line(raw)
     raw = strip_stray_tags(raw)
-    raw = _fix_field_labels(raw)
-    raw = _trim_canonical_fields(raw)
-    raw = _normalize_shot_labels(raw)
-    fields = ("integrated_multimodal_description", "overall_soundscape",
-              "non_diegetic_music")
+    if mode != "Ref2VA":
+        raw = _fix_field_labels(raw)
+    raw = _trim_canonical_fields(raw, fields, keep_blank)
+    if mode != "Ref2VA":
+        raw = _normalize_shot_labels(raw)
     positions = []
     for field in fields:
         pos = raw.find(field + ":")
@@ -1178,6 +1228,7 @@ def video_to_prompt(video_path: str, out_dir: Path, vlm: dict,
         log(f"keyframes: {keyframe_paths['first']} / {keyframe_paths['last']}")
 
     default_guide = ("ltx-prompt-guide-base.md" if mode == "LTX"
+                     else "minimax-h3-prompt-guide-ref2va.md" if mode == "Ref2VA"
                      else "minimax-h3-prompt-guide-base.md")
     guide_path = Path(__file__).resolve().parent / "md" / default_guide
     if not guide_path.is_file():
@@ -1230,6 +1281,24 @@ def video_to_prompt(video_path: str, out_dir: Path, vlm: dict,
 
     (out_dir / "analysis.json").write_text(
         json.dumps(analysis, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    if mode == "Ref2VA":
+        # reference pictures for the prompt's <Picture N> labels: first frame
+        # of each analyzed shot, at original resolution
+        keyframes_dir.mkdir(parents=True, exist_ok=True)
+        for s in analysis.get("shots", []):
+            m = re.match(r"\[?([0-9.]+)s", str(s.get("time_range", "")))
+            if not m:
+                continue
+            t = min(float(m.group(1)), max(info["duration"] - 0.05, 0.0))
+            idx = s.get("index", "?")
+            run_cmd(["ffmpeg", "-y", "-v", "error", "-ss", f"{t:.3f}", "-i", str(video),
+                     "-frames:v", "1", "-q:v", "2",
+                     str(keyframes_dir / f"shot_{idx}.jpg")],
+                    f"reference frame for Shot {idx}")
+        log(f"reference frames saved to {keyframes_dir} - attach these (plus the "
+            "reference video/audio if the prompt references <Video N>/<Audio N>) "
+            "to the H3 API together with the prompt")
 
     prompt_text = run_rewrite(backend, mode, duration, analysis, guide_text,
                               transcript, tags=tag_lines, max_new_tokens=max_new_tokens,
